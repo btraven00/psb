@@ -1,0 +1,4 @@
+telemetry.db
+*.swp
+*.swo
+/server

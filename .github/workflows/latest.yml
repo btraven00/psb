@@ -1,0 +1,66 @@
+name: Latest Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-latest:
+    name: Build and Release Latest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        cache: true
+
+    - name: Get commit info
+      id: commit
+      run: |
+        echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        echo "DATE=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+    - name: Build binary
+      env:
+        GOOS: linux
+        GOARCH: amd64
+        CGO_ENABLED: 0
+      run: |
+        VERSION="latest-${{ steps.commit.outputs.DATE }}-${{ steps.commit.outputs.SHORT_SHA }}"
+        go build -v -ldflags="-s -w -X main.Version=$VERSION" -o psb-server ./cmd/server
+        
+        # Create checksums
+        sha256sum psb-server > psb-server.sha256
+
+    - name: Upload to Latest Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: latest
+        name: Latest Build
+        draft: false
+        prerelease: true
+        files: |
+          psb-server
+          psb-server.sha256
+        body: |
+          Latest build from commit ${{ steps.commit.outputs.SHORT_SHA }}
+          
+          **⚠️ This is an automated pre-release build from the latest commit.**
+          
+          Built on: ${{ steps.commit.outputs.DATE }}
+          Commit: ${{ github.sha }}
+          Platform: Linux AMD64
+          
+          ### Download
+          Download `psb-server` and verify with `psb-server.sha256`
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
