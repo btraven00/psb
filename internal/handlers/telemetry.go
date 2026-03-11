@@ -108,15 +108,16 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // up to 1 MiB per line
 
+	// First pass: parse all lines
+	type parsedLine struct {
+		lineNum int
+		payload RecordPayload
+	}
 	var (
-		accepted   int
-		duplicates int
-		rejected   int
-		errors     []lineError
-		lineNum    int
-
-		// Cache environment upserts within this request
-		envCache = make(map[string]uint) // env hash -> env ID
+		parsed   []parsedLine
+		rejected int
+		errors   []lineError
+		lineNum  int
 	)
 
 	for scanner.Scan() {
@@ -139,60 +140,7 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 			continue
 		}
 
-		// Check for duplicate (session_id + record_id)
-		var existing models.ExecutionMetric
-		if err := h.DB.Where("session_id = ? AND record_id = ?", p.SessionID, p.RecordID).First(&existing).Error; err == nil {
-			duplicates++
-			continue
-		}
-
-		// Upsert environment by hash (cached per request)
-		env := models.Environment{
-			HostHash:         p.HostHash,
-			CPUModel:         p.CPUModel,
-			CPUFlags:         p.CPUFlags,
-			OS:               p.OS,
-			KernelVersion:    p.KernelVersion,
-			KernelString:     p.KernelString,
-			SnakemakeVersion: p.SnakemakeVersion,
-			DeployMode:       p.DeployMode,
-		}
-		envHash := env.ComputeHash()
-
-		envID, cached := envCache[envHash]
-		if !cached {
-			env.Hash = envHash
-			if err := h.DB.Where("hash = ?", envHash).FirstOrCreate(&env).Error; err != nil {
-				rejected++
-				errors = append(errors, lineError{Line: lineNum, Error: "db error"})
-				continue
-			}
-			envID = env.ID
-			envCache[envHash] = envID
-		}
-
-		metric := models.ExecutionMetric{
-			SessionID:      p.SessionID,
-			RecordID:       p.RecordID,
-			EnvironmentID:  envID,
-			Tool:           p.Tool,
-			CommandPattern: p.CommandPattern,
-			Parameters:     p.Parameters,
-			InputSize:      p.InputSize,
-			InputType:      p.InputType,
-			RuntimeSec:     p.RuntimeSec,
-			MaxRSS:         p.MaxRSS,
-			AvgCPUPercent:  p.AvgCPUPercent,
-			ExitCode:       p.ExitCode,
-			Timestamp:      time.Now().UTC(),
-		}
-		if err := h.DB.Create(&metric).Error; err != nil {
-			rejected++
-			errors = append(errors, lineError{Line: lineNum, Error: "db error"})
-			continue
-		}
-
-		accepted++
+		parsed = append(parsed, parsedLine{lineNum: lineNum, payload: p})
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -201,6 +149,79 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 
 	if lineNum == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "empty payload"})
+	}
+
+	// Second pass: insert within a single transaction
+	var (
+		accepted   int
+		duplicates int
+		envCache   = make(map[string]uint) // env hash -> env ID
+	)
+
+	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
+		for _, pl := range parsed {
+			p := pl.payload
+
+			// Check for duplicate (session_id + record_id)
+			var existing models.ExecutionMetric
+			if err := tx.Where("session_id = ? AND record_id = ?", p.SessionID, p.RecordID).First(&existing).Error; err == nil {
+				duplicates++
+				continue
+			}
+
+			// Upsert environment by hash (cached per request)
+			env := models.Environment{
+				HostHash:         p.HostHash,
+				CPUModel:         p.CPUModel,
+				CPUFlags:         p.CPUFlags,
+				OS:               p.OS,
+				KernelVersion:    p.KernelVersion,
+				KernelString:     p.KernelString,
+				SnakemakeVersion: p.SnakemakeVersion,
+				DeployMode:       p.DeployMode,
+			}
+			envHash := env.ComputeHash()
+
+			envID, cached := envCache[envHash]
+			if !cached {
+				env.Hash = envHash
+				if err := tx.Where("hash = ?", envHash).FirstOrCreate(&env).Error; err != nil {
+					rejected++
+					errors = append(errors, lineError{Line: pl.lineNum, Error: "db error"})
+					continue
+				}
+				envID = env.ID
+				envCache[envHash] = envID
+			}
+
+			metric := models.ExecutionMetric{
+				SessionID:      p.SessionID,
+				RecordID:       p.RecordID,
+				EnvironmentID:  envID,
+				Tool:           p.Tool,
+				CommandPattern: p.CommandPattern,
+				Parameters:     p.Parameters,
+				InputSize:      p.InputSize,
+				InputType:      p.InputType,
+				RuntimeSec:     p.RuntimeSec,
+				MaxRSS:         p.MaxRSS,
+				AvgCPUPercent:  p.AvgCPUPercent,
+				ExitCode:       p.ExitCode,
+				Timestamp:      time.Now().UTC(),
+			}
+			if err := tx.Create(&metric).Error; err != nil {
+				rejected++
+				errors = append(errors, lineError{Line: pl.lineNum, Error: "db error"})
+				continue
+			}
+
+			accepted++
+		}
+		return nil
+	})
+
+	if txErr != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "transaction failed"})
 	}
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{

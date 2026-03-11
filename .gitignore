@@ -2,3 +2,5 @@ telemetry.db
 *.swp
 *.swo
 /server
+telemetry.db-shm
+telemetry.db-wal
