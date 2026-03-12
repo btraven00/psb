@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/btraven00/psb/internal/models"
 	"github.com/labstack/echo/v4"
+	"github.com/parquet-go/parquet-go"
 )
 
 // CommitHash is set at build time via ldflags, with runtime VCS fallback.
@@ -392,6 +394,7 @@ const sessionTmpl = `<!DOCTYPE html>
 
 <div style="margin-top: 1rem;">
   <a href="/session/{{.SessionID}}/jsonl" class="theme-toggle" style="text-decoration:none; display:inline-block;">download jsonl</a>
+  <a href="/session/{{.SessionID}}/parquet" class="theme-toggle" style="text-decoration:none; display:inline-block; margin-left:0.5rem;">download parquet</a>
 </div>
 
 <div class="page-footer">
@@ -974,4 +977,93 @@ func (h *Handler) DownloadSessionJSONL(c echo.Context) error {
 		enc.Encode(line)
 	}
 	return nil
+}
+
+// ParquetRow is a flat struct for parquet export.
+type ParquetRow struct {
+	SessionID        string  `parquet:"session_id"`
+	RecordID         string  `parquet:"record_id"`
+	Tool             string  `parquet:"tool"`
+	CommandPattern   string  `parquet:"command"`
+	Parameters       string  `parquet:"params"`
+	InputSize        int64   `parquet:"input_size"`
+	InputType        string  `parquet:"input_type"`
+	RuntimeSec       float64 `parquet:"runtime_sec"`
+	MaxRSSMB         float64 `parquet:"max_rss_mb"`
+	AvgCPUPercent    float64 `parquet:"cpu_percent"`
+	ExitCode         int     `parquet:"exit_code"`
+	Timestamp        string  `parquet:"timestamp"`
+	HostHash         string  `parquet:"host_hash"`
+	CPUModel         string  `parquet:"cpu_model"`
+	OS               string  `parquet:"os"`
+	KernelVersion    string  `parquet:"kernel_version"`
+	SnakemakeVersion string  `parquet:"sm_version"`
+	DeployMode       string  `parquet:"deploy_mode"`
+}
+
+func (h *Handler) DownloadSessionParquet(c echo.Context) error {
+	sessionID := c.Param("id")
+	if !safeID.MatchString(sessionID) {
+		return c.String(http.StatusBadRequest, "invalid session id")
+	}
+
+	var metrics []models.ExecutionMetric
+	h.DB.Where("session_id = ?", sessionID).Order("id ASC").Find(&metrics)
+	if len(metrics) == 0 {
+		return c.String(http.StatusNotFound, "session not found")
+	}
+
+	// Build env lookup
+	envIDs := make(map[uint]bool)
+	for _, m := range metrics {
+		envIDs[m.EnvironmentID] = true
+	}
+	ids := make([]uint, 0, len(envIDs))
+	for id := range envIDs {
+		ids = append(ids, id)
+	}
+	var envs []models.Environment
+	h.DB.Where("id IN ?", ids).Find(&envs)
+	envMap := make(map[uint]models.Environment, len(envs))
+	for _, e := range envs {
+		envMap[e.ID] = e
+	}
+
+	rows := make([]ParquetRow, len(metrics))
+	for i, m := range metrics {
+		env := envMap[m.EnvironmentID]
+		rows[i] = ParquetRow{
+			SessionID:        m.SessionID,
+			RecordID:         m.RecordID,
+			Tool:             m.Tool,
+			CommandPattern:   m.CommandPattern,
+			Parameters:       m.Parameters,
+			InputSize:        m.InputSize,
+			InputType:        m.InputType,
+			RuntimeSec:       m.RuntimeSec,
+			MaxRSSMB:         m.MaxRSS,
+			AvgCPUPercent:    m.AvgCPUPercent,
+			ExitCode:         m.ExitCode,
+			Timestamp:        m.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			HostHash:         env.HostHash,
+			CPUModel:         env.CPUModel,
+			OS:               env.OS,
+			KernelVersion:    env.KernelVersion,
+			SnakemakeVersion: env.SnakemakeVersion,
+			DeployMode:       env.DeployMode,
+		}
+	}
+
+	var buf bytes.Buffer
+	w := parquet.NewGenericWriter[ParquetRow](&buf)
+	if _, err := w.Write(rows); err != nil {
+		return c.String(http.StatusInternalServerError, "failed to write parquet")
+	}
+	if err := w.Close(); err != nil {
+		return c.String(http.StatusInternalServerError, "failed to close parquet writer")
+	}
+
+	c.Response().Header().Set("Content-Type", "application/octet-stream")
+	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="session-%s.parquet"`, sessionID))
+	return c.Blob(http.StatusOK, "application/octet-stream", buf.Bytes())
 }

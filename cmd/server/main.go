@@ -93,6 +93,7 @@ func main() {
 	e.GET("/", h.ViewTelemetry)
 	e.GET("/session/:id", h.ViewSession)
 	e.GET("/session/:id/jsonl", h.DownloadSessionJSONL)
+	e.GET("/session/:id/parquet", h.DownloadSessionParquet)
 	e.GET("/env/:id", h.ViewEnv)
 	e.GET("/record/:id", h.ViewRecord)
 	e.GET("/record/:id/json", h.DownloadRecordJSON)
