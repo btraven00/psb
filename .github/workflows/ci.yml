@@ -49,7 +49,7 @@ jobs:
         cache: true
 
     - name: Build
-      run: go build -v -o psb-server ./cmd/server
+      run: go build -v -ldflags="-X github.com/btraven00/psb/internal/handlers.CommitHash=${{ github.sha }}" -o psb-server ./cmd/server
 
     - name: Test binary
       run: |

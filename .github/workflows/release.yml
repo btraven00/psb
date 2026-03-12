@@ -44,7 +44,7 @@ jobs:
         GOARCH: amd64
         CGO_ENABLED: 0
       run: |
-        go build -v -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o psb-server ./cmd/server
+        go build -v -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }} -X github.com/btraven00/psb/internal/handlers.CommitHash=${{ github.sha }}" -o psb-server ./cmd/server
         
         # Create checksums
         sha256sum psb-server > psb-server.sha256

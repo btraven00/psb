@@ -36,7 +36,7 @@ jobs:
         CGO_ENABLED: 0
       run: |
         VERSION="latest-${{ steps.commit.outputs.DATE }}-${{ steps.commit.outputs.SHORT_SHA }}"
-        go build -v -ldflags="-s -w -X main.Version=$VERSION" -o psb-server ./cmd/server
+        go build -v -ldflags="-s -w -X main.Version=$VERSION -X github.com/btraven00/psb/internal/handlers.CommitHash=${{ github.sha }}" -o psb-server ./cmd/server
         
         # Create checksums
         sha256sum psb-server > psb-server.sha256

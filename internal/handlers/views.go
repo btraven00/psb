@@ -7,13 +7,26 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 
 	"github.com/btraven00/psb/internal/models"
 	"github.com/labstack/echo/v4"
 )
 
-const pageSize = 25
+// CommitHash is set at build time via ldflags, with runtime VCS fallback.
+var CommitHash = func() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	return "dev"
+}()
+
+const pageSize = 40
 
 // safeID matches alphanumeric, underscores, hyphens only (no path traversal, no injection).
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
@@ -52,15 +65,15 @@ const sharedCSS = `
     font-size: 13px;
     background: var(--bg);
     color: var(--fg);
-    padding: 2rem 3rem;
-    line-height: 1.6;
+    padding: 1rem 3rem 2.5rem 3rem;
+    line-height: 1.5;
   }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .header {
     border-bottom: 1px solid var(--border);
-    padding-bottom: 1rem;
-    margin-bottom: 2rem;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
   }
   .header h1 {
     font-size: 14px;
@@ -78,7 +91,7 @@ const sharedCSS = `
     color: var(--dim);
     text-transform: uppercase;
     letter-spacing: 0.15em;
-    margin: 2rem 0 0.5rem 0;
+    margin: 1rem 0 0.3rem 0;
   }
   .section-label::before {
     content: "// ";
@@ -118,8 +131,25 @@ const sharedCSS = `
   .ts { color: var(--dim); font-size: 11px; }
   .session { color: var(--yellow); font-size: 11px; }
   .record { color: var(--dim); font-size: 11px; }
+  .page-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    z-index: 10;
+  }
+  .page-footer-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
   .pagination {
-    margin: 1.5rem 0;
     display: flex;
     gap: 2px;
   }
@@ -132,6 +162,7 @@ const sharedCSS = `
     font-size: 12px;
   }
   .pagination a:hover { color: var(--fg); border-color: var(--dim); }
+  .pagination .ellipsis { color: var(--dim); font-size: 12px; padding: 2px 4px; }
   .pagination .current {
     color: var(--accent);
     border-color: var(--accent);
@@ -139,7 +170,6 @@ const sharedCSS = `
   .meta {
     color: var(--dim);
     font-size: 11px;
-    margin-top: 0.5rem;
   }
   .empty { color: var(--dim); padding: 1rem 0; }
   .layout { display: flex; gap: 2rem; }
@@ -189,6 +219,7 @@ const sharedCSS = `
     letter-spacing: 0.05em;
   }
   .theme-toggle:hover { color: var(--fg); border-color: var(--dim); }
+  .build-footer { font-size: 10px; color: var(--dim); font-family: monospace; letter-spacing: 0.05em; }
   .header-row { display: flex; justify-content: space-between; align-items: center; }
 `
 
@@ -267,7 +298,7 @@ const viewTmpl = `<!DOCTYPE html>
     <tr>
       <td class="session"><a href="/session/{{.SessionID}}">{{.SessionID}}</a></td>
       <td class="record"><a href="/record/{{.RecordID}}">{{.RecordID}}</a></td>
-      <td class="id"><a href="/env/{{.EnvironmentID}}">{{index $.EnvMap .EnvironmentID}}</a></td>
+      <td class="id"><a href="/?platform={{index $.EnvMap .EnvironmentID}}">{{index $.EnvMap .EnvironmentID}}</a></td>
       <td class="tool"><a href="/?tool={{.Tool}}">{{.Tool}}</a></td>
       <td class="cmd">{{.CommandPattern}}</td>
       <td class="size">{{.InputSizeHuman}}</td>
@@ -282,20 +313,22 @@ const viewTmpl = `<!DOCTYPE html>
     {{end}}
   </table>
 
-  <div class="pagination">
-    {{range .PageItems}}
-      {{if .Current}}
-        <span class="current">{{.Num}}</span>
-      {{else}}
-        <a href="{{.URL}}">{{.Num}}</a>
+
+</div>
+
+</div>
+
+<div class="page-footer">
+  <div class="page-footer-left">
+    <div class="pagination">
+      {{range .PageItems}}
+        {{if .Ellipsis}}<span class="ellipsis">…</span>{{else if .Current}}<span class="current">{{.Num}}</span>{{else}}<a href="{{.URL}}">{{.Num}}</a>{{end}}
       {{end}}
-    {{end}}
+    </div>
+    <span class="meta">page {{.CurrentPage}}/{{.TotalPages}} · {{.TotalMetrics}} records</span>
   </div>
-  <p class="meta">page {{.CurrentPage}}/{{.TotalPages}} · {{.TotalMetrics}} records</p>
+  <div class="build-footer" title="{{commitHash}}">{{shortHash}}</div>
 </div>
-
-</div>
-
 </body>
 </html>`
 
@@ -356,21 +389,22 @@ const sessionTmpl = `<!DOCTYPE html>
   {{end}}
 </table>
 
-<div class="pagination">
-  {{range .Pages}}
-    {{if eq . $.CurrentPage}}
-      <span class="current">{{.}}</span>
-    {{else}}
-      <a href="?page={{.}}">{{.}}</a>
-    {{end}}
-  {{end}}
-</div>
-<p class="meta">page {{.CurrentPage}}/{{.TotalPages}} · {{.Total}} records in session</p>
 
-<div style="margin-top: 2rem;">
+<div style="margin-top: 1rem;">
   <a href="/session/{{.SessionID}}/jsonl" class="theme-toggle" style="text-decoration:none; display:inline-block;">download jsonl</a>
 </div>
 
+<div class="page-footer">
+  <div class="page-footer-left">
+    <div class="pagination">
+      {{range .PageItems}}
+        {{if .Ellipsis}}<span class="ellipsis">…</span>{{else if .Current}}<span class="current">{{.Num}}</span>{{else}}<a href="{{.URL}}">{{.Num}}</a>{{end}}
+      {{end}}
+    </div>
+    <span class="meta">page {{.CurrentPage}}/{{.TotalPages}} · {{.Total}} records</span>
+  </div>
+  <div class="build-footer" title="{{commitHash}}">{{shortHash}}</div>
+</div>
 </body>
 </html>`
 
@@ -435,6 +469,10 @@ const recordTmpl = `<!DOCTYPE html>
   <a href="/record/{{.Metric.RecordID}}/json" class="theme-toggle" style="text-decoration:none; display:inline-block;">download json</a>
 </div>
 
+<div class="page-footer">
+  <div class="page-footer-left"></div>
+  <div class="build-footer" title="{{commitHash}}">{{shortHash}}</div>
+</div>
 </body>
 </html>`
 
@@ -496,17 +534,17 @@ const envTmpl = `<!DOCTYPE html>
   {{end}}
 </table>
 
-<div class="pagination">
-  {{range .Pages}}
-    {{if eq . $.CurrentPage}}
-      <span class="current">{{.}}</span>
-    {{else}}
-      <a href="?page={{.}}">{{.}}</a>
-    {{end}}
-  {{end}}
+<div class="page-footer">
+  <div class="page-footer-left">
+    <div class="pagination">
+      {{range .PageItems}}
+        {{if .Ellipsis}}<span class="ellipsis">…</span>{{else if .Current}}<span class="current">{{.Num}}</span>{{else}}<a href="{{.URL}}">{{.Num}}</a>{{end}}
+      {{end}}
+    </div>
+    <span class="meta">page {{.CurrentPage}}/{{.TotalPages}} · {{.Total}} records</span>
+  </div>
+  <div class="build-footer" title="{{commitHash}}">{{shortHash}}</div>
 </div>
-<p class="meta">page {{.CurrentPage}}/{{.TotalPages}} · {{.Total}} records</p>
-
 </body>
 </html>`
 
@@ -515,6 +553,13 @@ const envTmpl = `<!DOCTYPE html>
 // ============================================================
 var templates = template.Must(
 	template.New("").Funcs(template.FuncMap{
+		"commitHash": func() string { return CommitHash },
+		"shortHash": func() string {
+			if len(CommitHash) > 7 {
+				return CommitHash[:7]
+			}
+			return CommitHash
+		},
 		"truncate": func(s string, n int) string {
 			if len(s) <= n {
 				return s
@@ -540,9 +585,47 @@ type StatItem struct {
 
 // PageItem holds a page number and its pre-built URL.
 type PageItem struct {
-	Num     int
-	URL     string
-	Current bool
+	Num      int
+	URL      string
+	Current  bool
+	Ellipsis bool
+}
+
+// windowedPages returns a Google-style paginator: [1] … [4][5][6] … [last]
+// urlFn maps a page number to its URL string.
+func windowedPages(current, total int, urlFn func(int) string) []PageItem {
+	if total <= 1 {
+		return []PageItem{{Num: 1, URL: urlFn(1), Current: true}}
+	}
+	// Collect which page numbers to show
+	show := map[int]bool{1: true, total: true}
+	for p := current - 2; p <= current+2; p++ {
+		if p >= 1 && p <= total {
+			show[p] = true
+		}
+	}
+	sorted := make([]int, 0, len(show))
+	for p := range show {
+		sorted = append(sorted, p)
+	}
+	// sort
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[i] > sorted[j] {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+	var items []PageItem
+	prev := 0
+	for _, p := range sorted {
+		if prev > 0 && p > prev+1 {
+			items = append(items, PageItem{Ellipsis: true})
+		}
+		items = append(items, PageItem{Num: p, URL: urlFn(p), Current: p == current})
+		prev = p
+	}
+	return items
 }
 
 // buildFilterURL constructs /?key=val&... from a map, omitting empty values.
@@ -622,19 +705,15 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 	}
 	q.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&metrics)
 
-	// Build page items with pre-computed URLs
-	pageItems := make([]PageItem, totalPages)
-	for i := range pageItems {
-		p := i + 1
-		params := map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": smFilter}
-		u := buildFilterURL(params)
+	// Build page items with pre-computed URLs (windowed, Google-style)
+	filterParams := map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": smFilter}
+	pageItems := windowedPages(page, totalPages, func(p int) string {
+		u := buildFilterURL(filterParams)
 		if u == "/" {
-			u += "?page=" + strconv.Itoa(p)
-		} else {
-			u += "&page=" + strconv.Itoa(p)
+			return u + "?page=" + strconv.Itoa(p)
 		}
-		pageItems[i] = PageItem{Num: p, URL: u, Current: p == page}
-	}
+		return u + "&page=" + strconv.Itoa(p)
+	})
 
 	// Top platforms by metric count
 	type countRow struct {
@@ -742,10 +821,9 @@ func (h *Handler) ViewSession(c echo.Context) error {
 		env = &e
 	}
 
-	pages := make([]int, totalPages)
-	for i := range pages {
-		pages[i] = i + 1
-	}
+	pageItems := windowedPages(page, totalPages, func(p int) string {
+		return "?page=" + strconv.Itoa(p)
+	})
 
 	data := map[string]interface{}{
 		"SessionID":   sessionID,
@@ -754,7 +832,7 @@ func (h *Handler) ViewSession(c echo.Context) error {
 		"Metrics":     metrics,
 		"CurrentPage": page,
 		"TotalPages":  totalPages,
-		"Pages":       pages,
+		"PageItems":   pageItems,
 	}
 
 	c.Response().Header().Set("Content-Type", "text/html")
@@ -838,10 +916,9 @@ func (h *Handler) ViewEnv(c echo.Context) error {
 	h.DB.Where("environment_id = ?", envID).Order("id DESC").
 		Offset((page - 1) * pageSize).Limit(pageSize).Find(&metrics)
 
-	pages := make([]int, totalPages)
-	for i := range pages {
-		pages[i] = i + 1
-	}
+	pageItems := windowedPages(page, totalPages, func(p int) string {
+		return "?page=" + strconv.Itoa(p)
+	})
 
 	data := map[string]interface{}{
 		"Env":         env,
@@ -849,7 +926,7 @@ func (h *Handler) ViewEnv(c echo.Context) error {
 		"Metrics":     metrics,
 		"CurrentPage": page,
 		"TotalPages":  totalPages,
-		"Pages":       pages,
+		"PageItems":   pageItems,
 	}
 
 	c.Response().Header().Set("Content-Type", "text/html")
