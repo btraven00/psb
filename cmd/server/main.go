@@ -97,6 +97,7 @@ func main() {
 	e.GET("/env/:id", h.ViewEnv)
 	e.GET("/record/:id", h.ViewRecord)
 	e.GET("/record/:id/json", h.DownloadRecordJSON)
+	e.GET("/export/parquet", h.DownloadToolWeekParquet)
 
 	// --- Start ---
 	tlsDomain := viper.GetString("tls-domain")

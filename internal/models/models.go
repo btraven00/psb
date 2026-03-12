@@ -2,6 +2,7 @@ package models
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,8 +29,8 @@ type Environment struct {
 // ComputeHash derives a deterministic SHA-256 hex digest from all key-value fields.
 func (e *Environment) ComputeHash() string {
 	h := sha256.New()
-	fmt.Fprintf(h, "host_hash=%s\ncpu_model=%s\ncpu_flags=%s\ncpu_features=%d\ncpu_cores=%d\nl2=%d\nl3=%d\nfreq=%d\nos=%s\nkernel=%s\nkernel_string=%s\nsm=%s\ndeploy=%s",
-		e.HostHash, e.CPUModel, e.CPUFlags, e.CPUFeatures, e.CPUCores, e.L2CacheKB, e.L3CacheKB, e.CPUFreqMHz, e.OS, e.KernelVersion, e.KernelString, e.SnakemakeVersion, e.DeployMode)
+	fmt.Fprintf(h, "host_hash=%s\ncpu_model=%s\ncpu_features=%d\ncpu_cores=%d\nl2=%d\nl3=%d\nfreq=%d\nos=%s\nkernel=%s\nkernel_string=%s\nsm=%s\ndeploy=%s",
+		e.HostHash, e.CPUModel, e.CPUFeatures, e.CPUCores, e.L2CacheKB, e.L3CacheKB, e.CPUFreqMHz, e.OS, e.KernelVersion, e.KernelString, e.SnakemakeVersion, e.DeployMode)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -41,6 +42,20 @@ func (e Environment) ShortHash() string {
 	return e.Hash
 }
 
+// Session holds workflow-level metadata, stored once per session_id.
+type Session struct {
+	ID              uint   `gorm:"primaryKey" json:"id"`
+	SessionID       string `gorm:"uniqueIndex;not null" json:"session_id"`
+	WorkflowURL     string `json:"workflow_url"`
+	WorkflowVersion string `json:"workflow_version"`
+}
+
+// FileEntry represents a single input or output file with its type and size.
+type FileEntry struct {
+	Type string `json:"type"`
+	Size int64  `json:"size"`
+}
+
 type ExecutionMetric struct {
 	ID             uint        `gorm:"primaryKey" json:"id"`
 	SessionID      string      `gorm:"uniqueIndex:idx_session_record;not null" json:"session_id"`
@@ -50,62 +65,124 @@ type ExecutionMetric struct {
 	Tool           string      `gorm:"index" json:"tool"`
 	CommandPattern string      `json:"command"`
 	Parameters     string      `json:"params"`
-	InputSize      int64       `json:"input_size"`
-	NumInputs      int         `json:"num_inputs"`
-	InputType      string      `json:"input_type"`
-	OutputSize     int64       `json:"output_size"`
+	ShellBlock     string      `json:"shell_block"`
+	Inputs         string      `json:"inputs"`  // JSON-encoded []FileEntry
+	Outputs        string      `json:"outputs"` // JSON-encoded []FileEntry
 	RuntimeSec     float64     `json:"runtime_sec"`
 	Threads        int         `json:"threads"`
 	MaxRSS         float64     `json:"max_rss_mb"`
 	AvgCPUPercent  float64     `json:"cpu_percent"`
+	MaxVMS         float64     `json:"max_vms_mb"`
+	MaxUSS         float64     `json:"max_uss_mb"`
+	MaxPSS         float64     `json:"max_pss_mb"`
+	IOIn           float64     `json:"io_in_mb"`
+	IOOut          float64     `json:"io_out_mb"`
+	CPUTime        float64     `json:"cpu_time_sec"`
+	Resources      string      `json:"resources"` // JSON-encoded dict
+	ToolVersion    string      `json:"tool_version"`
+	Category       string      `json:"category"`
 	ExitCode       int         `json:"exit_code"`
-	LoadAvg        float64     `json:"load_avg"`     // 1-min load average at job start
-	MemAvailMB     int         `json:"mem_avail_mb"` // available memory at job start
-	SwapUsedMB     int         `json:"swap_used_mb"` // swap in use at job start
-	IOWaitPct      float64     `json:"io_wait_pct"`  // iowait % during the job
+	LoadAvg        float64     `json:"load_avg"`
+	MemAvailMB     int         `json:"mem_avail_mb"`
+	SwapUsedMB     int         `json:"swap_used_mb"`
+	IOWaitPct      float64     `json:"io_wait_pct"`
 	Timestamp      time.Time   `json:"timestamp"`
 }
 
-func (m ExecutionMetric) InputSizeHuman() string {
-	b := float64(m.InputSize)
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GB", b/(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MB", b/(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KB", b/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", m.InputSize)
+// ParsedInputs deserializes the Inputs JSON column into a slice of FileEntry.
+func (m ExecutionMetric) ParsedInputs() []FileEntry {
+	var entries []FileEntry
+	if m.Inputs != "" {
+		json.Unmarshal([]byte(m.Inputs), &entries)
 	}
+	return entries
+}
+
+// ParsedOutputs deserializes the Outputs JSON column into a slice of FileEntry.
+func (m ExecutionMetric) ParsedOutputs() []FileEntry {
+	var entries []FileEntry
+	if m.Outputs != "" {
+		json.Unmarshal([]byte(m.Outputs), &entries)
+	}
+	return entries
+}
+
+// TotalInputSize returns the sum of all input file sizes in bytes.
+func (m ExecutionMetric) TotalInputSize() int64 {
+	var total int64
+	for _, e := range m.ParsedInputs() {
+		total += e.Size
+	}
+	return total
+}
+
+// TotalOutputSize returns the sum of all output file sizes in bytes.
+func (m ExecutionMetric) TotalOutputSize() int64 {
+	var total int64
+	for _, e := range m.ParsedOutputs() {
+		total += e.Size
+	}
+	return total
+}
+
+// NumInputs returns the number of input files.
+func (m ExecutionMetric) NumInputs() int {
+	return len(m.ParsedInputs())
+}
+
+// NumOutputs returns the number of output files.
+func (m ExecutionMetric) NumOutputs() int {
+	return len(m.ParsedOutputs())
+}
+
+// InputTypes returns comma-separated unique input file types.
+func (m ExecutionMetric) InputTypes() string {
+	seen := map[string]bool{}
+	var types []string
+	for _, e := range m.ParsedInputs() {
+		if e.Type != "" && !seen[e.Type] {
+			seen[e.Type] = true
+			types = append(types, e.Type)
+		}
+	}
+	return strings.Join(types, ",")
+}
+
+func humanSize(b int64) string {
+	fb := float64(b)
+	switch {
+	case fb >= 1<<30:
+		return fmt.Sprintf("%.1f GB", fb/(1<<30))
+	case fb >= 1<<20:
+		return fmt.Sprintf("%.1f MB", fb/(1<<20))
+	case fb >= 1<<10:
+		return fmt.Sprintf("%.1f KB", fb/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+func (m ExecutionMetric) InputSizeHuman() string {
+	return humanSize(m.TotalInputSize())
 }
 
 func (m ExecutionMetric) OutputSizeHuman() string {
-	b := float64(m.OutputSize)
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GB", b/(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MB", b/(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KB", b/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", m.OutputSize)
-	}
+	return humanSize(m.TotalOutputSize())
 }
 
-// InputTypeClean returns the input type with a leading "." stripped.
+// InputTypeClean returns the input types with leading "." stripped.
 func (m ExecutionMetric) InputTypeClean() string {
-	return strings.TrimPrefix(m.InputType, ".")
+	return strings.TrimPrefix(m.InputTypes(), ".")
 }
 
 // InputTypePrimary returns the longest (most specific) type for table views,
 // with "[…]" appended if there are additional types.
 func (m ExecutionMetric) InputTypePrimary() string {
-	if m.InputType == "" {
+	types := m.InputTypes()
+	if types == "" {
 		return ""
 	}
-	parts := strings.Split(m.InputType, ",")
+	parts := strings.Split(types, ",")
 	best := ""
 	for _, p := range parts {
 		p = strings.TrimPrefix(strings.TrimSpace(p), ".")
@@ -121,10 +198,11 @@ func (m ExecutionMetric) InputTypePrimary() string {
 
 // InputTypeList returns all types formatted as "[typea typeb typec]".
 func (m ExecutionMetric) InputTypeList() string {
-	if m.InputType == "" {
+	types := m.InputTypes()
+	if types == "" {
 		return ""
 	}
-	parts := strings.Split(m.InputType, ",")
+	parts := strings.Split(types, ",")
 	var cleaned []string
 	for _, p := range parts {
 		p = strings.TrimPrefix(strings.TrimSpace(p), ".")

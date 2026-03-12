@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,6 +19,10 @@ type RecordPayload struct {
 	// Session & record identification
 	SessionID string `json:"session_id"`
 	RecordID  string `json:"record_id"`
+
+	// Session-level fields (stored once per session, taken from first line)
+	WorkflowURL     string `json:"workflow_url"`
+	WorkflowVersion string `json:"workflow_version"`
 
 	// Environment fields (repeated per line, server deduplicates by hash)
 	HostHash         string `json:"host_hash"`
@@ -34,23 +39,31 @@ type RecordPayload struct {
 	SnakemakeVersion string `json:"sm_version"`
 	DeployMode       string `json:"deploy_mode"`
 
-	// Metric fields
-	Tool           string  `json:"tool"`
-	CommandPattern string  `json:"command"`
-	Parameters     string  `json:"params"`
-	InputSize      int64   `json:"input_size"`
-	NumInputs      int     `json:"num_inputs"`
-	InputType      string  `json:"input_type"`
-	OutputSize     int64   `json:"output_size"`
-	RuntimeSec     float64 `json:"runtime_sec"`
-	Threads        int     `json:"threads"`
-	MaxRSS         float64 `json:"max_rss_mb"`
-	AvgCPUPercent  float64 `json:"cpu_percent"`
-	ExitCode       int     `json:"exit_code"`
-	LoadAvg        float64 `json:"load_avg"`
-	MemAvailMB     int     `json:"mem_avail_mb"`
-	SwapUsedMB     int     `json:"swap_used_mb"`
-	IOWaitPct      float64 `json:"io_wait_pct"`
+	// Observation fields
+	Tool           string             `json:"tool"`
+	CommandPattern string             `json:"command"`
+	Parameters     string             `json:"params"`
+	ShellBlock     string             `json:"shell_block"`
+	Inputs         []models.FileEntry `json:"inputs"`
+	Outputs        []models.FileEntry `json:"outputs"`
+	RuntimeSec     float64            `json:"runtime_sec"`
+	Threads        int                `json:"threads"`
+	MaxRSS         float64            `json:"max_rss_mb"`
+	AvgCPUPercent  float64            `json:"cpu_percent"`
+	MaxVMS         float64            `json:"max_vms_mb"`
+	MaxUSS         float64            `json:"max_uss_mb"`
+	MaxPSS         float64            `json:"max_pss_mb"`
+	IOIn           float64            `json:"io_in_mb"`
+	IOOut          float64            `json:"io_out_mb"`
+	CPUTime        float64            `json:"cpu_time_sec"`
+	Resources      string             `json:"resources"`
+	ToolVersion    string             `json:"tool_version"`
+	Category       string             `json:"category"`
+	ExitCode       int                `json:"exit_code"`
+	LoadAvg        float64            `json:"load_avg"`
+	MemAvailMB     int                `json:"mem_avail_mb"`
+	SwapUsedMB     int                `json:"swap_used_mb"`
+	IOWaitPct      float64            `json:"io_wait_pct"`
 }
 
 type Handler struct {
@@ -91,6 +104,24 @@ func validateRecord(p *RecordPayload) string {
 		}
 	}
 	return ""
+}
+
+// sanitizeURL strips query, fragment, and auth from a URL. Returns "" for invalid URLs.
+func sanitizeURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.String()
 }
 
 const maxBodySize = 10 << 20 // 10 MiB
@@ -166,9 +197,10 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 
 	// Second pass: insert within a single transaction
 	var (
-		accepted   int
-		duplicates int
-		envCache   = make(map[string]uint) // env hash -> env ID
+		accepted    int
+		duplicates  int
+		envCache    = make(map[string]uint) // env hash -> env ID
+		sessionSeen = make(map[string]bool) // session_id -> already upserted
 	)
 
 	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
@@ -182,10 +214,20 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 				continue
 			}
 
+			// Upsert session (once per session_id per request)
+			if !sessionSeen[p.SessionID] {
+				sess := models.Session{
+					SessionID:       p.SessionID,
+					WorkflowURL:     sanitizeURL(p.WorkflowURL),
+					WorkflowVersion: p.WorkflowVersion,
+				}
+				tx.Where("session_id = ?", p.SessionID).FirstOrCreate(&sess)
+				sessionSeen[p.SessionID] = true
+			}
+
 			// Upsert environment by hash (cached per request)
 			features := p.CPUFeatures
 			if features == 0 && p.CPUFlags != "" {
-				// Backfill: old client sent raw flags, encode them
 				features = cpufeatures.Encode(p.CPUFlags)
 			}
 			env := models.Environment{
@@ -217,6 +259,9 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 				envCache[envHash] = envID
 			}
 
+			inputsJSON, _ := json.Marshal(p.Inputs)
+			outputsJSON, _ := json.Marshal(p.Outputs)
+
 			metric := models.ExecutionMetric{
 				SessionID:      p.SessionID,
 				RecordID:       p.RecordID,
@@ -224,14 +269,22 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 				Tool:           p.Tool,
 				CommandPattern: p.CommandPattern,
 				Parameters:     p.Parameters,
-				InputSize:      p.InputSize,
-				NumInputs:      p.NumInputs,
-				InputType:      p.InputType,
-				OutputSize:     p.OutputSize,
+				ShellBlock:     p.ShellBlock,
+				Inputs:         string(inputsJSON),
+				Outputs:        string(outputsJSON),
 				RuntimeSec:     p.RuntimeSec,
 				Threads:        p.Threads,
 				MaxRSS:         p.MaxRSS,
 				AvgCPUPercent:  p.AvgCPUPercent,
+				MaxVMS:         p.MaxVMS,
+				MaxUSS:         p.MaxUSS,
+				MaxPSS:         p.MaxPSS,
+				IOIn:           p.IOIn,
+				IOOut:          p.IOOut,
+				CPUTime:        p.CPUTime,
+				Resources:      p.Resources,
+				ToolVersion:    p.ToolVersion,
+				Category:       p.Category,
 				ExitCode:       p.ExitCode,
 				LoadAvg:        p.LoadAvg,
 				MemAvailMB:     p.MemAvailMB,

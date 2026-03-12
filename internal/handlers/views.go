@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strconv"
+	"time"
 
 	"github.com/btraven00/psb/internal/cpufeatures"
 	"github.com/btraven00/psb/internal/models"
@@ -365,6 +366,8 @@ const sessionTmpl = `<!DOCTYPE html>
 <div class="section-label">session</div>
 <div class="field"><span class="label">session_id</span><span class="val yellow">{{.SessionID}}</span></div>
 <div class="field"><span class="label">total records</span><span class="val">{{.Total}}</span></div>
+{{if .Session}}{{if .Session.WorkflowURL}}<div class="field"><span class="label">workflow</span><span class="val"><a href="{{.Session.WorkflowURL}}">{{.Session.WorkflowURL}}</a></span></div>{{end}}
+{{if .Session.WorkflowVersion}}<div class="field"><span class="label">version</span><span class="val">{{.Session.WorkflowVersion}}</span></div>{{end}}{{end}}
 {{if .Env}}
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
@@ -466,20 +469,29 @@ const recordTmpl = `<!DOCTYPE html>
 
 <div class="section-label">execution</div>
 <div class="field"><span class="label">tool</span><span class="val accent">{{.Metric.Tool}}</span></div>
+{{if .Metric.ToolVersion}}<div class="field"><span class="label">tool_version</span><span class="val">{{.Metric.ToolVersion}}</span></div>{{end}}
 <div class="field"><span class="label">command</span><span class="val">{{.Metric.CommandPattern}}</span></div>
 <div class="field"><span class="label">params</span><span class="val">{{.Metric.Parameters}}</span></div>
+{{if .Metric.Category}}<div class="field"><span class="label">category</span><span class="val">{{.Metric.Category}}</span></div>{{end}}
+{{if .Metric.ShellBlock}}<div class="field"><span class="label">shell_block</span><span class="val" style="white-space:pre-wrap;font-size:11px;">{{.Metric.ShellBlock}}</span></div>{{end}}
 
 <div class="section-label">i/o</div>
-<div class="field"><span class="label">input_size</span><span class="val yellow">{{.Metric.InputSizeHuman}} ({{.Metric.InputSize}} bytes)</span></div>
+<div class="field"><span class="label">input_size</span><span class="val yellow">{{.Metric.InputSizeHuman}} ({{.Metric.TotalInputSize}} bytes)</span></div>
 {{if .Metric.NumInputs}}<div class="field"><span class="label">num_inputs</span><span class="val">{{.Metric.NumInputs}}</span></div>{{end}}
 <div class="field"><span class="label">input_type</span><span class="val">{{.Metric.InputTypeList}}</span></div>
-{{if .Metric.OutputSize}}<div class="field"><span class="label">output_size</span><span class="val yellow">{{.Metric.OutputSizeHuman}} ({{.Metric.OutputSize}} bytes)</span></div>{{end}}
+{{if .Metric.TotalOutputSize}}<div class="field"><span class="label">output_size</span><span class="val yellow">{{.Metric.OutputSizeHuman}} ({{.Metric.TotalOutputSize}} bytes)</span></div>{{end}}
 
 <div class="section-label">performance</div>
 <div class="field"><span class="label">runtime</span><span class="val green">{{printf "%.2f" .Metric.RuntimeSec}}s</span></div>
 {{if .Metric.Threads}}<div class="field"><span class="label">threads</span><span class="val">{{.Metric.Threads}}</span></div>{{end}}
 <div class="field"><span class="label">max_rss</span><span class="val">{{printf "%.1f" .Metric.MaxRSS}} MB</span></div>
+{{if .Metric.MaxVMS}}<div class="field"><span class="label">max_vms</span><span class="val">{{printf "%.1f" .Metric.MaxVMS}} MB</span></div>{{end}}
+{{if .Metric.MaxUSS}}<div class="field"><span class="label">max_uss</span><span class="val">{{printf "%.1f" .Metric.MaxUSS}} MB</span></div>{{end}}
+{{if .Metric.MaxPSS}}<div class="field"><span class="label">max_pss</span><span class="val">{{printf "%.1f" .Metric.MaxPSS}} MB</span></div>{{end}}
 <div class="field"><span class="label">cpu</span><span class="val">{{printf "%.1f" .Metric.AvgCPUPercent}}%</span></div>
+{{if .Metric.CPUTime}}<div class="field"><span class="label">cpu_time</span><span class="val">{{printf "%.2f" .Metric.CPUTime}}s</span></div>{{end}}
+{{if .Metric.IOIn}}<div class="field"><span class="label">io_read</span><span class="val">{{printf "%.1f" .Metric.IOIn}} MB</span></div>{{end}}
+{{if .Metric.IOOut}}<div class="field"><span class="label">io_write</span><span class="val">{{printf "%.1f" .Metric.IOOut}} MB</span></div>{{end}}
 <div class="field"><span class="label">exit_code</span><span class="val {{if eq .Metric.ExitCode 0}}green{{else}}red{{end}}">{{.Metric.ExitCode}}</span></div>
 
 {{if or .Metric.LoadAvg .Metric.MemAvailMB .Metric.SwapUsedMB .Metric.IOWaitPct}}
@@ -872,6 +884,13 @@ func (h *Handler) ViewSession(c echo.Context) error {
 		env = &e
 	}
 
+	// Grab session metadata
+	var sess *models.Session
+	var s models.Session
+	if err := h.DB.Where("session_id = ?", sessionID).First(&s).Error; err == nil {
+		sess = &s
+	}
+
 	pageItems := windowedPages(page, totalPages, func(p int) string {
 		return "?page=" + strconv.Itoa(p)
 	})
@@ -879,6 +898,7 @@ func (h *Handler) ViewSession(c echo.Context) error {
 	data := map[string]interface{}{
 		"SessionID":   sessionID,
 		"Total":       total,
+		"Session":     sess,
 		"Env":         env,
 		"Metrics":     metrics,
 		"CurrentPage": page,
@@ -927,9 +947,13 @@ func (h *Handler) DownloadRecordJSON(c echo.Context) error {
 	var env models.Environment
 	h.DB.First(&env, metric.EnvironmentID)
 
+	var sess models.Session
+	h.DB.Where("session_id = ?", metric.SessionID).First(&sess)
+
 	payload := map[string]interface{}{
-		"metric":      metric,
+		"observation": metric,
 		"environment": env,
+		"session":     sess,
 	}
 
 	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="record-%s.json"`, recordID))
@@ -996,21 +1020,8 @@ func (h *Handler) DownloadSessionJSONL(c echo.Context) error {
 		return c.String(http.StatusNotFound, "session not found")
 	}
 
-	// Build env lookup
-	envIDs := make(map[uint]bool)
-	for _, m := range metrics {
-		envIDs[m.EnvironmentID] = true
-	}
-	ids := make([]uint, 0, len(envIDs))
-	for id := range envIDs {
-		ids = append(ids, id)
-	}
-	var envs []models.Environment
-	h.DB.Where("id IN ?", ids).Find(&envs)
-	envMap := make(map[uint]models.Environment, len(envs))
-	for _, e := range envs {
-		envMap[e.ID] = e
-	}
+	envMap := h.buildEnvMap(metrics)
+	sessMap := h.buildSessionMap(metrics)
 
 	c.Response().Header().Set("Content-Type", "application/x-ndjson")
 	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="session-%s.jsonl"`, sessionID))
@@ -1019,8 +1030,9 @@ func (h *Handler) DownloadSessionJSONL(c echo.Context) error {
 	enc := json.NewEncoder(c.Response().Writer)
 	for _, m := range metrics {
 		line := map[string]interface{}{
-			"metric":      m,
+			"observation": m,
 			"environment": envMap[m.EnvironmentID],
+			"session":     sessMap[m.SessionID],
 		}
 		enc.Encode(line)
 	}
@@ -1028,20 +1040,34 @@ func (h *Handler) DownloadSessionJSONL(c echo.Context) error {
 }
 
 // ParquetRow is a flat struct for parquet export.
+// Includes both raw JSON arrays (inputs/outputs) and computed scalar totals.
 type ParquetRow struct {
 	SessionID        string  `parquet:"session_id"`
 	RecordID         string  `parquet:"record_id"`
 	Tool             string  `parquet:"tool"`
+	ToolVersion      string  `parquet:"tool_version"`
+	Category         string  `parquet:"category"`
 	CommandPattern   string  `parquet:"command"`
 	Parameters       string  `parquet:"params"`
+	ShellBlock       string  `parquet:"shell_block"`
+	Inputs           string  `parquet:"inputs"`
+	Outputs          string  `parquet:"outputs"`
 	InputSize        int64   `parquet:"input_size"`
 	NumInputs        int     `parquet:"num_inputs"`
 	InputType        string  `parquet:"input_type"`
 	OutputSize       int64   `parquet:"output_size"`
+	NumOutputs       int     `parquet:"num_outputs"`
 	RuntimeSec       float64 `parquet:"runtime_sec"`
 	Threads          int     `parquet:"threads"`
 	MaxRSSMB         float64 `parquet:"max_rss_mb"`
+	MaxVMS           float64 `parquet:"max_vms_mb"`
+	MaxUSS           float64 `parquet:"max_uss_mb"`
+	MaxPSS           float64 `parquet:"max_pss_mb"`
 	AvgCPUPercent    float64 `parquet:"cpu_percent"`
+	CPUTime          float64 `parquet:"cpu_time_sec"`
+	IOIn             float64 `parquet:"io_in_mb"`
+	IOOut            float64 `parquet:"io_out_mb"`
+	Resources        string  `parquet:"resources"`
 	ExitCode         int     `parquet:"exit_code"`
 	LoadAvg          float64 `parquet:"load_avg"`
 	MemAvailMB       int     `parquet:"mem_avail_mb"`
@@ -1057,55 +1083,46 @@ type ParquetRow struct {
 	CPUFreqMHz       int     `parquet:"cpu_freq_mhz"`
 	OS               string  `parquet:"os"`
 	KernelVersion    string  `parquet:"kernel_version"`
+	KernelString     string  `parquet:"kernel_string"`
 	SnakemakeVersion string  `parquet:"sm_version"`
 	DeployMode       string  `parquet:"deploy_mode"`
+	WorkflowURL      string  `parquet:"workflow_url"`
+	WorkflowVersion  string  `parquet:"workflow_version"`
 }
 
-func (h *Handler) DownloadSessionParquet(c echo.Context) error {
-	sessionID := c.Param("id")
-	if !safeID.MatchString(sessionID) {
-		return c.String(http.StatusBadRequest, "invalid session id")
-	}
-
-	var metrics []models.ExecutionMetric
-	h.DB.Where("session_id = ?", sessionID).Order("id ASC").Find(&metrics)
-	if len(metrics) == 0 {
-		return c.String(http.StatusNotFound, "session not found")
-	}
-
-	// Build env lookup
-	envIDs := make(map[uint]bool)
-	for _, m := range metrics {
-		envIDs[m.EnvironmentID] = true
-	}
-	ids := make([]uint, 0, len(envIDs))
-	for id := range envIDs {
-		ids = append(ids, id)
-	}
-	var envs []models.Environment
-	h.DB.Where("id IN ?", ids).Find(&envs)
-	envMap := make(map[uint]models.Environment, len(envs))
-	for _, e := range envs {
-		envMap[e.ID] = e
-	}
-
+// buildParquetRows converts metrics + env/session lookups into flat ParquetRows.
+func buildParquetRows(metrics []models.ExecutionMetric, envMap map[uint]models.Environment, sessMap map[string]models.Session) []ParquetRow {
 	rows := make([]ParquetRow, len(metrics))
 	for i, m := range metrics {
 		env := envMap[m.EnvironmentID]
+		sess := sessMap[m.SessionID]
 		rows[i] = ParquetRow{
 			SessionID:        m.SessionID,
 			RecordID:         m.RecordID,
 			Tool:             m.Tool,
+			ToolVersion:      m.ToolVersion,
+			Category:         m.Category,
 			CommandPattern:   m.CommandPattern,
 			Parameters:       m.Parameters,
-			InputSize:        m.InputSize,
-			NumInputs:        m.NumInputs,
-			InputType:        m.InputType,
-			OutputSize:       m.OutputSize,
+			ShellBlock:       m.ShellBlock,
+			Inputs:           m.Inputs,
+			Outputs:          m.Outputs,
+			InputSize:        m.TotalInputSize(),
+			NumInputs:        m.NumInputs(),
+			InputType:        m.InputTypes(),
+			OutputSize:       m.TotalOutputSize(),
+			NumOutputs:       m.NumOutputs(),
 			RuntimeSec:       m.RuntimeSec,
 			Threads:          m.Threads,
 			MaxRSSMB:         m.MaxRSS,
+			MaxVMS:           m.MaxVMS,
+			MaxUSS:           m.MaxUSS,
+			MaxPSS:           m.MaxPSS,
 			AvgCPUPercent:    m.AvgCPUPercent,
+			CPUTime:          m.CPUTime,
+			IOIn:             m.IOIn,
+			IOOut:            m.IOOut,
+			Resources:        m.Resources,
 			ExitCode:         m.ExitCode,
 			LoadAvg:          m.LoadAvg,
 			MemAvailMB:       m.MemAvailMB,
@@ -1121,10 +1138,67 @@ func (h *Handler) DownloadSessionParquet(c echo.Context) error {
 			CPUFreqMHz:       env.CPUFreqMHz,
 			OS:               env.OS,
 			KernelVersion:    env.KernelVersion,
+			KernelString:     env.KernelString,
 			SnakemakeVersion: env.SnakemakeVersion,
 			DeployMode:       env.DeployMode,
+			WorkflowURL:      sess.WorkflowURL,
+			WorkflowVersion:  sess.WorkflowVersion,
 		}
 	}
+	return rows
+}
+
+// buildEnvMap fetches environments for a set of metrics.
+func (h *Handler) buildEnvMap(metrics []models.ExecutionMetric) map[uint]models.Environment {
+	envIDs := make(map[uint]bool)
+	for _, m := range metrics {
+		envIDs[m.EnvironmentID] = true
+	}
+	ids := make([]uint, 0, len(envIDs))
+	for id := range envIDs {
+		ids = append(ids, id)
+	}
+	var envs []models.Environment
+	h.DB.Where("id IN ?", ids).Find(&envs)
+	envMap := make(map[uint]models.Environment, len(envs))
+	for _, e := range envs {
+		envMap[e.ID] = e
+	}
+	return envMap
+}
+
+// buildSessionMap fetches sessions for a set of metrics.
+func (h *Handler) buildSessionMap(metrics []models.ExecutionMetric) map[string]models.Session {
+	sessIDs := make(map[string]bool)
+	for _, m := range metrics {
+		sessIDs[m.SessionID] = true
+	}
+	sids := make([]string, 0, len(sessIDs))
+	for sid := range sessIDs {
+		sids = append(sids, sid)
+	}
+	var sessions []models.Session
+	h.DB.Where("session_id IN ?", sids).Find(&sessions)
+	sessMap := make(map[string]models.Session, len(sessions))
+	for _, s := range sessions {
+		sessMap[s.SessionID] = s
+	}
+	return sessMap
+}
+
+func (h *Handler) DownloadSessionParquet(c echo.Context) error {
+	sessionID := c.Param("id")
+	if !safeID.MatchString(sessionID) {
+		return c.String(http.StatusBadRequest, "invalid session id")
+	}
+
+	var metrics []models.ExecutionMetric
+	h.DB.Where("session_id = ?", sessionID).Order("id ASC").Find(&metrics)
+	if len(metrics) == 0 {
+		return c.String(http.StatusNotFound, "session not found")
+	}
+
+	rows := buildParquetRows(metrics, h.buildEnvMap(metrics), h.buildSessionMap(metrics))
 
 	var buf bytes.Buffer
 	w := parquet.NewGenericWriter[ParquetRow](&buf)
@@ -1137,5 +1211,72 @@ func (h *Handler) DownloadSessionParquet(c echo.Context) error {
 
 	c.Response().Header().Set("Content-Type", "application/octet-stream")
 	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="session-%s.parquet"`, sessionID))
+	return c.Blob(http.StatusOK, "application/octet-stream", buf.Bytes())
+}
+
+// parseISOWeek parses "YYYY-Www" (e.g. "2026-W11") into Monday 00:00 and Sunday 23:59:59 UTC.
+func parseISOWeek(s string) (start, end time.Time, err error) {
+	// Expected format: 2026-W11
+	if len(s) < 7 || len(s) > 8 || s[4] != '-' || s[5] != 'W' {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid week format %q, expected YYYY-Www", s)
+	}
+	year, err := strconv.Atoi(s[:4])
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid year in %q", s)
+	}
+	week, err := strconv.Atoi(s[6:])
+	if err != nil || week < 1 || week > 53 {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid week number in %q", s)
+	}
+	// ISO week: Jan 4 is always in week 1. Find the Monday of week 1.
+	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.UTC)
+	weekday := jan4.Weekday()
+	if weekday == 0 {
+		weekday = 7 // Sunday = 7 in ISO
+	}
+	// Monday of week 1
+	monday1 := jan4.AddDate(0, 0, -int(weekday-1))
+	start = monday1.AddDate(0, 0, (week-1)*7)
+	end = start.AddDate(0, 0, 7).Add(-time.Second)
+	return start, end, nil
+}
+
+func (h *Handler) DownloadToolWeekParquet(c echo.Context) error {
+	tool := c.QueryParam("tool")
+	week := c.QueryParam("week")
+
+	if tool == "" {
+		return c.String(http.StatusBadRequest, "tool parameter is required")
+	}
+	if week == "" {
+		return c.String(http.StatusBadRequest, "week parameter is required (format: YYYY-Www, e.g. 2026-W11)")
+	}
+
+	weekStart, weekEnd, err := parseISOWeek(week)
+	if err != nil {
+		return c.String(http.StatusBadRequest, err.Error())
+	}
+
+	var metrics []models.ExecutionMetric
+	h.DB.Where("tool = ? AND timestamp >= ? AND timestamp <= ?", tool, weekStart, weekEnd).
+		Order("id ASC").Find(&metrics)
+	if len(metrics) == 0 {
+		return c.String(http.StatusNotFound, fmt.Sprintf("no records for tool %q in week %s", tool, week))
+	}
+
+	rows := buildParquetRows(metrics, h.buildEnvMap(metrics), h.buildSessionMap(metrics))
+
+	var buf bytes.Buffer
+	w := parquet.NewGenericWriter[ParquetRow](&buf)
+	if _, err := w.Write(rows); err != nil {
+		return c.String(http.StatusInternalServerError, "failed to write parquet")
+	}
+	if err := w.Close(); err != nil {
+		return c.String(http.StatusInternalServerError, "failed to close parquet writer")
+	}
+
+	filename := fmt.Sprintf("%s-%s.parquet", tool, week)
+	c.Response().Header().Set("Content-Type", "application/octet-stream")
+	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	return c.Blob(http.StatusOK, "application/octet-stream", buf.Bytes())
 }
