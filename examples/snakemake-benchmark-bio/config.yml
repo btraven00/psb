@@ -1,0 +1,11 @@
+psb:
+  workflow_url: "https://github.com/snakemake-workflows/rna-seq-star-deseq2"
+  workflow_version: "v2.1.0"
+  category: "rna-seq"
+
+genome_size: 1000000
+num_reads: 500000
+read_len: 150
+samples:
+  - "sampleA"
+  - "sampleB"

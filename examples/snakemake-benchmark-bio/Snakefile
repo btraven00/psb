@@ -1,0 +1,216 @@
+# Realistic bioinformatics workflow for PSB telemetry testing.
+#
+# Pipeline: simulate reads from a small reference genome, align with bwa-mem2,
+# then sort/index/stats with samtools. Every rule is a real bioinformatics
+# tool invocation that exercises CPU and memory.
+#
+# Requirements: run with --use-conda so the biotools.yaml env is created.
+#
+# Usage:
+#   snakemake --cores 4 --use-conda \
+#       --share-benchmark --share-benchmark-collector http://localhost:8080
+
+configfile: workflow.source_path("config.yml")
+
+SAMPLES = config["samples"]
+GENOME_SIZE = config["genome_size"]
+NUM_READS = config["num_reads"]
+READ_LEN = config["read_len"]
+
+
+rule all:
+    input:
+        expand("results/{sample}.flagstat", sample=SAMPLES),
+        expand("results/{sample}.idxstats", sample=SAMPLES),
+
+
+# -- Reference preparation ----------------------------------------------------
+
+rule simulate_reference:
+    """Generate a random FASTA reference genome."""
+    output:
+        "reference/genome.fa"
+    params:
+        genome_size=GENOME_SIZE,
+    shell:
+        """
+        awk 'BEGIN {{
+            srand(42);
+            bases="ACGT";
+            printf ">chr1\\n";
+            for (i=0; i<{params.genome_size}; i++) {{
+                printf "%s", substr(bases, int(rand()*4)+1, 1);
+                if ((i+1) % 80 == 0) printf "\\n";
+            }}
+            printf "\\n";
+        }}' > {output}
+        """
+
+
+rule bwa_index:
+    """Index the reference genome with bwa-mem2."""
+    input:
+        "reference/genome.fa"
+    output:
+        multiext("reference/genome.fa", ".0123", ".amb", ".ann", ".bwt.2bit.64", ".pac"),
+    params:
+        _psb_tool="bwa-mem2",
+        _psb_tool_version="2.2.1",
+        _psb_primary_cmd="index",
+        _psb_category="indexing",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "bwa-mem2 index {input}"
+
+
+rule samtools_faidx:
+    """Index the reference with samtools faidx."""
+    input:
+        "reference/genome.fa"
+    output:
+        "reference/genome.fa.fai"
+    params:
+        _psb_tool="samtools",
+        _psb_tool_version="1.21",
+        _psb_primary_cmd="faidx",
+        _psb_category="indexing",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "samtools faidx {input}"
+
+
+# -- Read simulation -----------------------------------------------------------
+
+rule simulate_reads:
+    """Simulate paired-end reads with wgsim."""
+    input:
+        ref="reference/genome.fa",
+        fai="reference/genome.fa.fai",
+    output:
+        r1="reads/{sample}_R1.fastq",
+        r2="reads/{sample}_R2.fastq",
+    params:
+        num_reads=NUM_READS,
+        read_len=READ_LEN,
+        _psb_tool="wgsim",
+        _psb_tool_version="1.21",
+        _psb_category="simulation",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        """
+        wgsim -1 {params.read_len} -2 {params.read_len} \
+              -N {params.num_reads} \
+              -S $(echo {wildcards.sample} | cksum | cut -d' ' -f1) \
+              {input.ref} {output.r1} {output.r2}
+        """
+
+
+rule compress_reads:
+    """Gzip raw FASTQ files."""
+    input:
+        "reads/{sample}_{pair}.fastq"
+    output:
+        "reads/{sample}_{pair}.fastq.gz"
+    shell:
+        "gzip -c {input} > {output}"
+
+
+# -- Alignment -----------------------------------------------------------------
+
+rule bwa_mem2_align:
+    """Align reads with bwa-mem2 -- CPU heavy, ~4 threads."""
+    input:
+        r1="reads/{sample}_R1.fastq.gz",
+        r2="reads/{sample}_R2.fastq.gz",
+        ref="reference/genome.fa",
+        idx=rules.bwa_index.output,
+    output:
+        "aligned/{sample}.bam"
+    threads: 4
+    params:
+        _psb_tool="bwa-mem2",
+        _psb_tool_version="2.2.1",
+        _psb_primary_cmd="mem",
+        _psb_category="alignment",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "bwa-mem2 mem -t {threads} {input.ref} {input.r1} {input.r2}"
+        " | samtools view -b -o {output}"
+
+
+# -- Post-alignment processing -------------------------------------------------
+
+rule samtools_sort:
+    """Sort BAM by coordinate -- exercises CPU + memory."""
+    input:
+        "aligned/{sample}.bam"
+    output:
+        "sorted/{sample}.sorted.bam"
+    threads: 4
+    params:
+        _psb_tool="samtools",
+        _psb_tool_version="1.21",
+        _psb_primary_cmd="sort",
+        _psb_params="-m 256M",
+        _psb_category="alignment",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "samtools sort -@ {threads} -m 256M -o {output} {input}"
+
+
+rule samtools_index:
+    """Index the sorted BAM."""
+    input:
+        "sorted/{sample}.sorted.bam"
+    output:
+        "sorted/{sample}.sorted.bam.bai"
+    params:
+        _psb_tool="samtools",
+        _psb_tool_version="1.21",
+        _psb_primary_cmd="index",
+        _psb_category="alignment",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "samtools index {input}"
+
+
+rule samtools_flagstat:
+    """Compute alignment statistics."""
+    input:
+        bam="sorted/{sample}.sorted.bam",
+        bai="sorted/{sample}.sorted.bam.bai",
+    output:
+        "results/{sample}.flagstat"
+    params:
+        _psb_tool="samtools",
+        _psb_tool_version="1.21",
+        _psb_primary_cmd="flagstat",
+        _psb_category="qc",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "samtools flagstat {input.bam} > {output}"
+
+
+rule samtools_idxstats:
+    """Per-chromosome alignment counts."""
+    input:
+        bam="sorted/{sample}.sorted.bam",
+        bai="sorted/{sample}.sorted.bam.bai",
+    output:
+        "results/{sample}.idxstats"
+    params:
+        _psb_tool="samtools",
+        _psb_tool_version="1.21",
+        _psb_primary_cmd="idxstats",
+        _psb_category="qc",
+    conda:
+        "envs/biotools.yaml"
+    shell:
+        "samtools idxstats {input.bam} > {output}"

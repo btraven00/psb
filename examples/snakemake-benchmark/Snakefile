@@ -1,0 +1,85 @@
+# Test Snakefile for PSB telemetry benchmarking.
+# Exercises CPU, memory, and I/O with common bioinformatics-style patterns
+# using only coreutils/standard tools (no bio tools required).
+#
+# Data sizes are chosen so each step runs 2-10 seconds -- long enough for the
+# benchmark timer (0.5s interval) to sample CPU and RSS at least a few times.
+
+CHUNKS = [1, 2, 3, 4]
+
+rule all:
+    input:
+        "results/final_report.txt"
+
+
+rule generate_reads:
+    """Simulate a FASTQ-like file with random data (~100 MB per chunk)."""
+    output:
+        "data/reads_{chunk}.fastq.gz"
+    shell:
+        """
+        dd if=/dev/urandom bs=1M count=100 2>/dev/null \
+            | base64 \
+            | gzip > {output}
+        """
+
+
+rule decompress:
+    """Decompress reads -- exercises gzip CPU."""
+    input:
+        "data/reads_{chunk}.fastq.gz"
+    output:
+        "data/reads_{chunk}.raw"
+    shell:
+        "gzip -dc {input} > {output}"
+
+
+rule sort_reads:
+    """Sort the raw text -- exercises sort CPU + memory (peak ~200 MB)."""
+    input:
+        "data/reads_{chunk}.raw"
+    output:
+        "intermediate/sorted_{chunk}.txt"
+    shell:
+        "sort --buffer-size=200M {input} > {output}"
+
+
+rule compute_checksums:
+    """SHA256 over sorted output -- pure CPU bound, ~3-5 s per 130 MB file."""
+    input:
+        "intermediate/sorted_{chunk}.txt"
+    output:
+        "intermediate/checksum_{chunk}.txt"
+    shell:
+        "sha256sum {input} > {output}"
+
+
+rule compress_results:
+    """Re-compress sorted data at max level -- heavy CPU, ~5-8 s per chunk."""
+    input:
+        "intermediate/sorted_{chunk}.txt"
+    output:
+        "results/compressed_{chunk}.txt.gz"
+    shell:
+        "gzip -9 -c {input} > {output}"
+
+
+rule aggregate:
+    """Merge all checksums and compressed sizes into a report."""
+    input:
+        checksums=expand("intermediate/checksum_{chunk}.txt", chunk=CHUNKS),
+        compressed=expand("results/compressed_{chunk}.txt.gz", chunk=CHUNKS),
+    output:
+        "results/final_report.txt"
+    shell:
+        """
+        echo "=== PSB Telemetry Test Report ===" > {output}
+        echo "" >> {output}
+        echo "--- Checksums ---" >> {output}
+        cat {input.checksums} >> {output}
+        echo "" >> {output}
+        echo "--- Compressed sizes ---" >> {output}
+        wc -c {input.compressed} >> {output}
+        echo "" >> {output}
+        echo "Done at $(date -Iseconds)" >> {output}
+        """
