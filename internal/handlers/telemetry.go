@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/btraven00/psb/internal/cpufeatures"
 	"github.com/btraven00/psb/internal/models"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -21,7 +22,12 @@ type RecordPayload struct {
 	// Environment fields (repeated per line, server deduplicates by hash)
 	HostHash         string `json:"host_hash"`
 	CPUModel         string `json:"cpu_model"`
-	CPUFlags         string `json:"cpu_flags"`
+	CPUFlags         string `json:"cpu_flags"`    // deprecated: raw flag string
+	CPUFeatures      uint64 `json:"cpu_features"` // bitmask of curated features
+	CPUCores         int    `json:"cpu_cores"`
+	L2CacheKB        int    `json:"l2_cache_kb"`
+	L3CacheKB        int    `json:"l3_cache_kb"`
+	CPUFreqMHz       int    `json:"cpu_freq_mhz"`
 	OS               string `json:"os"`
 	KernelVersion    string `json:"kernel_version"`
 	KernelString     string `json:"kernel_string"`
@@ -33,11 +39,18 @@ type RecordPayload struct {
 	CommandPattern string  `json:"command"`
 	Parameters     string  `json:"params"`
 	InputSize      int64   `json:"input_size"`
+	NumInputs      int     `json:"num_inputs"`
 	InputType      string  `json:"input_type"`
+	OutputSize     int64   `json:"output_size"`
 	RuntimeSec     float64 `json:"runtime_sec"`
+	Threads        int     `json:"threads"`
 	MaxRSS         float64 `json:"max_rss_mb"`
 	AvgCPUPercent  float64 `json:"cpu_percent"`
 	ExitCode       int     `json:"exit_code"`
+	LoadAvg        float64 `json:"load_avg"`
+	MemAvailMB     int     `json:"mem_avail_mb"`
+	SwapUsedMB     int     `json:"swap_used_mb"`
+	IOWaitPct      float64 `json:"io_wait_pct"`
 }
 
 type Handler struct {
@@ -170,10 +183,20 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 			}
 
 			// Upsert environment by hash (cached per request)
+			features := p.CPUFeatures
+			if features == 0 && p.CPUFlags != "" {
+				// Backfill: old client sent raw flags, encode them
+				features = cpufeatures.Encode(p.CPUFlags)
+			}
 			env := models.Environment{
 				HostHash:         p.HostHash,
 				CPUModel:         p.CPUModel,
 				CPUFlags:         p.CPUFlags,
+				CPUFeatures:      features,
+				CPUCores:         p.CPUCores,
+				L2CacheKB:        p.L2CacheKB,
+				L3CacheKB:        p.L3CacheKB,
+				CPUFreqMHz:       p.CPUFreqMHz,
 				OS:               p.OS,
 				KernelVersion:    p.KernelVersion,
 				KernelString:     p.KernelString,
@@ -202,11 +225,18 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 				CommandPattern: p.CommandPattern,
 				Parameters:     p.Parameters,
 				InputSize:      p.InputSize,
+				NumInputs:      p.NumInputs,
 				InputType:      p.InputType,
+				OutputSize:     p.OutputSize,
 				RuntimeSec:     p.RuntimeSec,
+				Threads:        p.Threads,
 				MaxRSS:         p.MaxRSS,
 				AvgCPUPercent:  p.AvgCPUPercent,
 				ExitCode:       p.ExitCode,
+				LoadAvg:        p.LoadAvg,
+				MemAvailMB:     p.MemAvailMB,
+				SwapUsedMB:     p.SwapUsedMB,
+				IOWaitPct:      p.IOWaitPct,
 				Timestamp:      time.Now().UTC(),
 			}
 			if err := tx.Create(&metric).Error; err != nil {

@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strconv"
 
+	"github.com/btraven00/psb/internal/cpufeatures"
 	"github.com/btraven00/psb/internal/models"
 	"github.com/labstack/echo/v4"
 	"github.com/parquet-go/parquet-go"
@@ -310,7 +311,7 @@ const viewTmpl = `<!DOCTYPE html>
       <td class="tool"><a href="/?tool={{.Tool}}">{{.Tool}}</a></td>
       <td class="cmd">{{.CommandPattern}}</td>
       <td class="size">{{.InputSizeHuman}}</td>
-      <td>{{.InputTypeClean}}</td>
+      <td>{{.InputTypePrimary}}</td>
       <td class="time">{{printf "%.2f" .RuntimeSec}}s</td>
       <td>{{printf "%.1f" .MaxRSS}}</td>
       <td>{{printf "%.1f" .AvgCPUPercent}}</td>
@@ -367,7 +368,13 @@ const sessionTmpl = `<!DOCTYPE html>
 {{if .Env}}
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
+{{if .Env.CPUCores}}<div class="field"><span class="label">cores</span><span class="val">{{.Env.CPUCores}}</span></div>{{end}}
+{{with envFeatures .Env}}<div class="field"><span class="label">features</span><span class="val" style="font-size:10px;">{{.}}</span></div>{{end}}
+{{if .Env.L2CacheKB}}<div class="field"><span class="label">l2 cache</span><span class="val">{{.Env.L2CacheKB}} KB</span></div>{{end}}
+{{if .Env.L3CacheKB}}<div class="field"><span class="label">l3 cache</span><span class="val">{{.Env.L3CacheKB}} KB</span></div>{{end}}
+{{if .Env.CPUFreqMHz}}<div class="field"><span class="label">freq</span><span class="val">{{.Env.CPUFreqMHz}} MHz</span></div>{{end}}
 <div class="field"><span class="label">os</span><span class="val">{{.Env.OS}} {{.Env.KernelVersion}}</span></div>
+<div class="field"><span class="label">deploy</span><span class="val">{{.Env.DeployMode}}</span></div>
 <div class="field"><span class="label">snakemake</span><span class="val">{{.Env.SnakemakeVersion}}</span></div>
 {{end}}
 
@@ -385,16 +392,13 @@ const sessionTmpl = `<!DOCTYPE html>
     <td class="cmd">{{.CommandPattern}}</td>
     <td class="param" title="{{.Parameters}}">{{truncate .Parameters 60}}</td>
     <td class="size">{{.InputSizeHuman}}</td>
-    <td>{{.InputTypeClean}}</td>
+<td>{{.InputTypePrimary}}</td>
     <td class="time">{{printf "%.2f" .RuntimeSec}}s</td>
     <td>{{printf "%.1f" .MaxRSS}}</td>
     <td>{{printf "%.1f" .AvgCPUPercent}}</td>
     <td {{if eq .ExitCode 0}}class="exit-ok"{{else}}class="exit-fail"{{end}}>{{.ExitCode}}</td>
     <td class="ts">{{.Timestamp.Format "2006-01-02 15:04:05"}}</td>
-  </tr>
-  {{else}}
-  <tr><td colspan="11" class="empty">-- no records --</td></tr>
-  {{end}}
+{{end}}
 </table>
 
 
@@ -449,7 +453,11 @@ const recordTmpl = `<!DOCTYPE html>
 <div class="section-label">environment</div>
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
-<div class="field"><span class="label">cpu_flags</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{if gt (len .Env.CPUFlags) 120}}<span id="cpu-flags-short">{{truncate .Env.CPUFlags 120}} <a href="#" onclick="document.getElementById('cpu-flags-short').style.display='none';document.getElementById('cpu-flags-full').style.display='inline';return false;" style="font-size:10px;color:var(--accent);">[see all]</a></span><span id="cpu-flags-full" style="display:none;word-break:break-all;">{{.Env.CPUFlags}}</span>{{else}}{{.Env.CPUFlags}}{{end}}</span></div>
+{{with envFeatures .Env}}<div class="field"><span class="label">cpu_features</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{.}}</span></div>{{end}}
+{{if .Env.CPUCores}}<div class="field"><span class="label">cores</span><span class="val">{{.Env.CPUCores}}</span></div>{{end}}
+{{if .Env.L2CacheKB}}<div class="field"><span class="label">l2_cache</span><span class="val">{{.Env.L2CacheKB}} KB</span></div>{{end}}
+{{if .Env.L3CacheKB}}<div class="field"><span class="label">l3_cache</span><span class="val">{{.Env.L3CacheKB}} KB</span></div>{{end}}
+{{if .Env.CPUFreqMHz}}<div class="field"><span class="label">freq</span><span class="val">{{.Env.CPUFreqMHz}} MHz</span></div>{{end}}
 <div class="field"><span class="label">os</span><span class="val">{{.Env.OS}}</span></div>
 <div class="field"><span class="label">kernel</span><span class="val">{{.Env.KernelVersion}}</span></div>
 <div class="field"><span class="label">kernel_string</span><span class="val">{{.Env.KernelString}}</span></div>
@@ -462,14 +470,25 @@ const recordTmpl = `<!DOCTYPE html>
 <div class="field"><span class="label">params</span><span class="val">{{.Metric.Parameters}}</span></div>
 
 <div class="section-label">i/o</div>
-<div class="field"><span class="label">input_size</span><span class="val yellow">{{.Metric.InputSize}} bytes</span></div>
-<div class="field"><span class="label">input_type</span><span class="val">{{.Metric.InputType}}</span></div>
+<div class="field"><span class="label">input_size</span><span class="val yellow">{{.Metric.InputSizeHuman}} ({{.Metric.InputSize}} bytes)</span></div>
+{{if .Metric.NumInputs}}<div class="field"><span class="label">num_inputs</span><span class="val">{{.Metric.NumInputs}}</span></div>{{end}}
+<div class="field"><span class="label">input_type</span><span class="val">{{.Metric.InputTypeList}}</span></div>
+{{if .Metric.OutputSize}}<div class="field"><span class="label">output_size</span><span class="val yellow">{{.Metric.OutputSizeHuman}} ({{.Metric.OutputSize}} bytes)</span></div>{{end}}
 
 <div class="section-label">performance</div>
 <div class="field"><span class="label">runtime</span><span class="val green">{{printf "%.2f" .Metric.RuntimeSec}}s</span></div>
+{{if .Metric.Threads}}<div class="field"><span class="label">threads</span><span class="val">{{.Metric.Threads}}</span></div>{{end}}
 <div class="field"><span class="label">max_rss</span><span class="val">{{printf "%.1f" .Metric.MaxRSS}} MB</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{printf "%.1f" .Metric.AvgCPUPercent}}%</span></div>
 <div class="field"><span class="label">exit_code</span><span class="val {{if eq .Metric.ExitCode 0}}green{{else}}red{{end}}">{{.Metric.ExitCode}}</span></div>
+
+{{if or .Metric.LoadAvg .Metric.MemAvailMB .Metric.SwapUsedMB .Metric.IOWaitPct}}
+<div class="section-label">system state</div>
+{{if .Metric.LoadAvg}}<div class="field"><span class="label">load_avg</span><span class="val">{{printf "%.2f" .Metric.LoadAvg}}</span></div>{{end}}
+{{if .Metric.MemAvailMB}}<div class="field"><span class="label">mem_avail</span><span class="val">{{.Metric.MemAvailMB}} MB</span></div>{{end}}
+{{if .Metric.SwapUsedMB}}<div class="field"><span class="label">swap_used</span><span class="val {{if gt .Metric.SwapUsedMB 0}}red{{end}}">{{.Metric.SwapUsedMB}} MB</span></div>{{end}}
+{{if .Metric.IOWaitPct}}<div class="field"><span class="label">iowait</span><span class="val">{{printf "%.2f" .Metric.IOWaitPct}}%</span></div>{{end}}
+{{end}}
 
 <div class="section-label">metadata</div>
 <div class="field"><span class="label">timestamp</span><span class="val">{{.Metric.Timestamp.Format "2006-01-02 15:04:05 UTC"}}</span></div>
@@ -510,7 +529,12 @@ const envTmpl = `<!DOCTYPE html>
 <div class="field"><span class="label">hash</span><span class="val">{{.Env.Hash}}</span></div>
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
-<div class="field"><span class="label">cpu_flags</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{.Env.CPUFlags}}</span></div>
+{{with envFeatures .Env}}<div class="field"><span class="label">cpu_features</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{.}}</span></div>{{end}}
+
+{{if .Env.CPUCores}}<div class="field"><span class="label">cores</span><span class="val">{{.Env.CPUCores}}</span></div>{{end}}
+{{if .Env.L2CacheKB}}<div class="field"><span class="label">l2_cache</span><span class="val">{{.Env.L2CacheKB}} KB</span></div>{{end}}
+{{if .Env.L3CacheKB}}<div class="field"><span class="label">l3_cache</span><span class="val">{{.Env.L3CacheKB}} KB</span></div>{{end}}
+{{if .Env.CPUFreqMHz}}<div class="field"><span class="label">freq</span><span class="val">{{.Env.CPUFreqMHz}} MHz</span></div>{{end}}
 <div class="field"><span class="label">os</span><span class="val">{{.Env.OS}}</span></div>
 <div class="field"><span class="label">kernel</span><span class="val">{{.Env.KernelVersion}}</span></div>
 <div class="field"><span class="label">kernel_string</span><span class="val">{{.Env.KernelString}}</span></div>
@@ -575,11 +599,29 @@ var templates = template.Must(
 			}
 			return s[:n] + "…"
 		},
+		"decodeFeatures": func(mask uint64) string {
+			return cpufeatures.Decode(mask)
+		},
+		"envFeatures": func(e models.Environment) string {
+			return envFeatureStr(e)
+		},
 	}).Parse(viewTmpl +
 		`{{define "session"}}` + sessionTmpl + `{{end}}` +
 		`{{define "record"}}` + recordTmpl + `{{end}}` +
 		`{{define "env"}}` + envTmpl + `{{end}}`),
 )
+
+// envFeatureStr returns decoded CPU features for an environment, falling back
+// to encoding the legacy CPUFlags string if CPUFeatures is zero.
+func envFeatureStr(e models.Environment) string {
+	if e.CPUFeatures != 0 {
+		return cpufeatures.Decode(e.CPUFeatures)
+	}
+	if e.CPUFlags != "" {
+		return cpufeatures.Decode(cpufeatures.Encode(e.CPUFlags))
+	}
+	return ""
+}
 
 // ============================================================
 // Handlers
@@ -993,14 +1035,26 @@ type ParquetRow struct {
 	CommandPattern   string  `parquet:"command"`
 	Parameters       string  `parquet:"params"`
 	InputSize        int64   `parquet:"input_size"`
+	NumInputs        int     `parquet:"num_inputs"`
 	InputType        string  `parquet:"input_type"`
+	OutputSize       int64   `parquet:"output_size"`
 	RuntimeSec       float64 `parquet:"runtime_sec"`
+	Threads          int     `parquet:"threads"`
 	MaxRSSMB         float64 `parquet:"max_rss_mb"`
 	AvgCPUPercent    float64 `parquet:"cpu_percent"`
 	ExitCode         int     `parquet:"exit_code"`
+	LoadAvg          float64 `parquet:"load_avg"`
+	MemAvailMB       int     `parquet:"mem_avail_mb"`
+	SwapUsedMB       int     `parquet:"swap_used_mb"`
+	IOWaitPct        float64 `parquet:"io_wait_pct"`
 	Timestamp        string  `parquet:"timestamp"`
 	HostHash         string  `parquet:"host_hash"`
 	CPUModel         string  `parquet:"cpu_model"`
+	CPUFeatures      string  `parquet:"cpu_features"`
+	CPUCores         int     `parquet:"cpu_cores"`
+	L2CacheKB        int     `parquet:"l2_cache_kb"`
+	L3CacheKB        int     `parquet:"l3_cache_kb"`
+	CPUFreqMHz       int     `parquet:"cpu_freq_mhz"`
 	OS               string  `parquet:"os"`
 	KernelVersion    string  `parquet:"kernel_version"`
 	SnakemakeVersion string  `parquet:"sm_version"`
@@ -1045,14 +1099,26 @@ func (h *Handler) DownloadSessionParquet(c echo.Context) error {
 			CommandPattern:   m.CommandPattern,
 			Parameters:       m.Parameters,
 			InputSize:        m.InputSize,
+			NumInputs:        m.NumInputs,
 			InputType:        m.InputType,
+			OutputSize:       m.OutputSize,
 			RuntimeSec:       m.RuntimeSec,
+			Threads:          m.Threads,
 			MaxRSSMB:         m.MaxRSS,
 			AvgCPUPercent:    m.AvgCPUPercent,
 			ExitCode:         m.ExitCode,
+			LoadAvg:          m.LoadAvg,
+			MemAvailMB:       m.MemAvailMB,
+			SwapUsedMB:       m.SwapUsedMB,
+			IOWaitPct:        m.IOWaitPct,
 			Timestamp:        m.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			HostHash:         env.HostHash,
 			CPUModel:         env.CPUModel,
+			CPUFeatures:      envFeatureStr(env),
+			CPUCores:         env.CPUCores,
+			L2CacheKB:        env.L2CacheKB,
+			L3CacheKB:        env.L3CacheKB,
+			CPUFreqMHz:       env.CPUFreqMHz,
 			OS:               env.OS,
 			KernelVersion:    env.KernelVersion,
 			SnakemakeVersion: env.SnakemakeVersion,
