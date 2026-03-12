@@ -124,6 +124,38 @@ func sanitizeURL(raw string) string {
 	return u.String()
 }
 
+// sanitizeResources redacts filesystem paths from the resources JSON string.
+// Keys like "tmpdir" leak absolute paths; replace their values with "REDACTED".
+func sanitizeResources(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return raw
+	}
+	for k, v := range m {
+		if s, ok := v.(string); ok {
+			if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") || strings.Contains(s, "\\") {
+				m[k] = "REDACTED"
+			}
+		}
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return string(out)
+}
+
+// sanitizeFileEntries strips leading dots from file type extensions.
+func sanitizeFileEntries(entries []models.FileEntry) []models.FileEntry {
+	for i := range entries {
+		entries[i].Type = strings.TrimLeft(entries[i].Type, ".")
+	}
+	return entries
+}
+
 const maxBodySize = 10 << 20 // 10 MiB
 
 func (h *Handler) PostTelemetry(c echo.Context) error {
@@ -259,8 +291,8 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 				envCache[envHash] = envID
 			}
 
-			inputsJSON, _ := json.Marshal(p.Inputs)
-			outputsJSON, _ := json.Marshal(p.Outputs)
+			inputsJSON, _ := json.Marshal(sanitizeFileEntries(p.Inputs))
+			outputsJSON, _ := json.Marshal(sanitizeFileEntries(p.Outputs))
 
 			metric := models.ExecutionMetric{
 				SessionID:      p.SessionID,
@@ -282,7 +314,7 @@ func (h *Handler) PostTelemetry(c echo.Context) error {
 				IOIn:           p.IOIn,
 				IOOut:          p.IOOut,
 				CPUTime:        p.CPUTime,
-				Resources:      p.Resources,
+				Resources:      sanitizeResources(p.Resources),
 				ToolVersion:    p.ToolVersion,
 				Category:       p.Category,
 				ExitCode:       p.ExitCode,

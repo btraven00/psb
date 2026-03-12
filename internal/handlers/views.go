@@ -269,7 +269,7 @@ const viewTmpl = `<!DOCTYPE html>
 <div class="layout">
 
 <div class="sidebar">
-  <div class="section-label">top platforms</div>
+  <div class="section-label">platforms</div>
   <ul class="stat-list">
     {{range .TopPlatforms}}
     <li class="stat-item{{if eq .Name $.PlatformFilter}} active{{end}}">
@@ -282,7 +282,7 @@ const viewTmpl = `<!DOCTYPE html>
   </ul>
   {{if .PlatformFilter}}<div style="margin-top:0.3rem;font-size:10px;"><a href="{{.ClearPlatformURL}}" style="color:var(--red);">[clear platform]</a></div>{{end}}
 
-  <div class="section-label">top snakemake</div>
+  <div class="section-label">snakemake version</div>
   <ul class="stat-list">
     {{range .TopSnakemake}}
     <li class="stat-item{{if eq .Name $.SmFilter}} active{{end}}">
@@ -294,10 +294,39 @@ const viewTmpl = `<!DOCTYPE html>
     {{end}}
   </ul>
   {{if .SmFilter}}<div style="margin-top:0.3rem;font-size:10px;"><a href="{{.ClearSmURL}}" style="color:var(--red);">[clear snakemake]</a></div>{{end}}
+
+  <div class="section-label">workflows</div>
+  <ul class="stat-list">
+    {{range .TopWorkflows}}
+    <li class="stat-item{{if eq .Name $.WorkflowFilter}} active{{end}}">
+      <a href="{{.URL}}" title="{{.Name}}">{{trimGH .Name}}</a>
+      <span class="count">{{.Count}}</span>
+    </li>
+    {{else}}
+    <li class="stat-item"><span class="empty">--</span></li>
+    {{end}}
+  </ul>
+  {{if .WorkflowFilter}}<div style="margin-top:0.3rem;font-size:10px;"><a href="{{.ClearWorkflowURL}}" style="color:var(--red);">[clear workflow]</a></div>{{end}}
+
+  {{if or (and .ToolFilter .ParquetWeek) (and .WorkflowFilter .WorkflowParquetWeek)}}
+  <div class="section-label">export</div>
+  {{if and .ToolFilter .ParquetWeek}}
+  <div style="margin-top:0.3rem;">
+    <a href="/export/parquet?tool={{.ToolFilter}}&week={{.ParquetWeek}}" class="theme-toggle" style="text-decoration:none; display:inline-block;">download parquet</a>
+    <div style="margin-top:0.3rem;font-size:10px;color:var(--dim);">tool: {{.ToolFilter}} · week: {{.ParquetWeek}}</div>
+  </div>
+  {{end}}
+  {{if and .WorkflowFilter .WorkflowParquetWeek}}
+  <div style="margin-top:0.3rem;">
+    <a href="/export/parquet?workflow={{.WorkflowFilter}}&week={{.WorkflowParquetWeek}}" class="theme-toggle" style="text-decoration:none; display:inline-block;">download parquet</a>
+    <div style="margin-top:0.3rem;font-size:10px;color:var(--dim);">workflow: {{trimGH .WorkflowFilter}} · week: {{.WorkflowParquetWeek}}</div>
+  </div>
+  {{end}}
+  {{end}}
 </div>
 
 <div class="main">
-  <div class="section-label">execution metrics{{if .ToolFilter}} <span style="color:var(--accent);font-size:11px;text-transform:none;letter-spacing:0;">— tool: {{.ToolFilter}} <a href="{{.ClearToolURL}}" style="color:var(--red);font-size:10px;">[clear]</a></span>{{end}}</div>
+  <div class="section-label">observations{{if .ToolFilter}} <span style="color:var(--accent);font-size:11px;text-transform:none;letter-spacing:0;">— tool: {{.ToolFilter}} <a href="{{.ClearToolURL}}" style="color:var(--red);font-size:10px;">[clear]</a></span>{{end}}</div>
   <table>
     <tr>
       <th>session</th><th>record</th><th>platform</th><th>tool</th><th>command</th>
@@ -357,10 +386,9 @@ const sessionTmpl = `<!DOCTYPE html>
 
 <div class="header">
   <div class="header-row">
-    <h1><span>psb</span> // session detail</h1>
+    <h1><a href="/" style="color:var(--accent);text-decoration:none;">psb</a> // session detail</h1>
     <button class="theme-toggle" onclick="toggleTheme()">theme</button>
   </div>
-  <div class="nav"><a href="/">&larr; back</a></div>
 </div>
 
 <div class="section-label">session</div>
@@ -372,10 +400,6 @@ const sessionTmpl = `<!DOCTYPE html>
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
 {{if .Env.CPUCores}}<div class="field"><span class="label">cores</span><span class="val">{{.Env.CPUCores}}</span></div>{{end}}
-{{with envFeatures .Env}}<div class="field"><span class="label">features</span><span class="val" style="font-size:10px;">{{.}}</span></div>{{end}}
-{{if .Env.L2CacheKB}}<div class="field"><span class="label">l2 cache</span><span class="val">{{.Env.L2CacheKB}} KB</span></div>{{end}}
-{{if .Env.L3CacheKB}}<div class="field"><span class="label">l3 cache</span><span class="val">{{.Env.L3CacheKB}} KB</span></div>{{end}}
-{{if .Env.CPUFreqMHz}}<div class="field"><span class="label">freq</span><span class="val">{{.Env.CPUFreqMHz}} MHz</span></div>{{end}}
 <div class="field"><span class="label">os</span><span class="val">{{.Env.OS}} {{.Env.KernelVersion}}</span></div>
 <div class="field"><span class="label">deploy</span><span class="val">{{.Env.DeployMode}}</span></div>
 <div class="field"><span class="label">snakemake</span><span class="val">{{.Env.SnakemakeVersion}}</span></div>
@@ -439,31 +463,72 @@ const recordTmpl = `<!DOCTYPE html>
 
 <div class="header">
   <div class="header-row">
-    <h1><span>psb</span> // record detail</h1>
-    <button class="theme-toggle" onclick="toggleTheme()">theme</button>
-  </div>
-  <div class="nav">
-    <a href="/">&larr; back</a>
-    &middot;
-    <a href="/session/{{.Metric.SessionID}}">&larr; session {{.Metric.SessionID}}</a>
+    <h1><a href="/" style="color:var(--accent);text-decoration:none;">psb</a> // record detail // <a href="/session/{{.Metric.SessionID}}" style="color:var(--dim);font-size:12px;">session {{.Metric.SessionID}}</a></h1>
+    <span style="display:flex;gap:4px;">
+      <a href="/record/{{.Metric.RecordID}}/json" class="theme-toggle" style="text-decoration:none; display:inline-block;">json</a>
+      <button class="theme-toggle" onclick="toggleTheme()">theme</button>
+    </span>
   </div>
 </div>
+
+<style>
+  .record-layout { display: flex; gap: 2rem; }
+  .record-main { flex: 1; min-width: 0; }
+  .record-panel {
+    flex: 0 0 420px;
+    position: sticky;
+    top: 2rem;
+    align-self: flex-start;
+    max-height: calc(100vh - 4rem);
+    overflow-y: auto;
+  }
+  .detail-box {
+    border: 1px solid var(--border);
+    margin-bottom: 0.5rem;
+  }
+  .detail-box summary {
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+    list-style: none;
+  }
+  .detail-box summary::before { content: "+ "; color: var(--accent); }
+  .detail-box[open] summary::before { content: "- "; }
+  .detail-box summary:hover { color: var(--fg); }
+  .detail-box .detail-content {
+    padding: 6px 8px;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 50vh;
+    overflow-y: auto;
+    color: var(--fg);
+    line-height: 1.6;
+  }
+</style>
+
+<div class="record-layout">
+<div class="record-main">
 
 <div class="section-label">identification</div>
 <div class="field"><span class="label">record_id</span><span class="val">{{.Metric.RecordID}}</span></div>
 <div class="field"><span class="label">session_id</span><span class="val yellow"><a href="/session/{{.Metric.SessionID}}">{{.Metric.SessionID}}</a></span></div>
+{{if .Session.WorkflowURL}}<div class="field"><span class="label">workflow</span><span class="val"><a href="{{.Session.WorkflowURL}}">{{.Session.WorkflowURL}}</a> <a href="/?workflow={{.Session.WorkflowURL}}" style="font-size:10px;color:var(--dim);">[filter]</a></span></div>{{end}}
+{{if .Session.WorkflowVersion}}<div class="field"><span class="label">version</span><span class="val">{{.Session.WorkflowVersion}}</span></div>{{end}}
 
 <div class="section-label">environment</div>
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
-{{with envFeatures .Env}}<div class="field"><span class="label">cpu_features</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{.}}</span></div>{{end}}
 {{if .Env.CPUCores}}<div class="field"><span class="label">cores</span><span class="val">{{.Env.CPUCores}}</span></div>{{end}}
 {{if .Env.L2CacheKB}}<div class="field"><span class="label">l2_cache</span><span class="val">{{.Env.L2CacheKB}} KB</span></div>{{end}}
 {{if .Env.L3CacheKB}}<div class="field"><span class="label">l3_cache</span><span class="val">{{.Env.L3CacheKB}} KB</span></div>{{end}}
 {{if .Env.CPUFreqMHz}}<div class="field"><span class="label">freq</span><span class="val">{{.Env.CPUFreqMHz}} MHz</span></div>{{end}}
-<div class="field"><span class="label">os</span><span class="val">{{.Env.OS}}</span></div>
-<div class="field"><span class="label">kernel</span><span class="val">{{.Env.KernelVersion}}</span></div>
-<div class="field"><span class="label">kernel_string</span><span class="val">{{.Env.KernelString}}</span></div>
+<div class="field"><span class="label">os</span><span class="val">{{.Env.OS}} {{.Env.KernelVersion}}</span></div>
 <div class="field"><span class="label">deploy</span><span class="val">{{.Env.DeployMode}}</span></div>
 <div class="field"><span class="label">snakemake</span><span class="val">{{.Env.SnakemakeVersion}}</span></div>
 
@@ -471,15 +536,15 @@ const recordTmpl = `<!DOCTYPE html>
 <div class="field"><span class="label">tool</span><span class="val accent">{{.Metric.Tool}}</span></div>
 {{if .Metric.ToolVersion}}<div class="field"><span class="label">tool_version</span><span class="val">{{.Metric.ToolVersion}}</span></div>{{end}}
 <div class="field"><span class="label">command</span><span class="val">{{.Metric.CommandPattern}}</span></div>
-<div class="field"><span class="label">params</span><span class="val">{{.Metric.Parameters}}</span></div>
+{{if .Metric.Parameters}}<div class="field"><span class="label">params</span><span class="val">{{truncate .Metric.Parameters 80}}</span></div>{{end}}
 {{if .Metric.Category}}<div class="field"><span class="label">category</span><span class="val">{{.Metric.Category}}</span></div>{{end}}
-{{if .Metric.ShellBlock}}<div class="field"><span class="label">shell_block</span><span class="val" style="white-space:pre-wrap;font-size:11px;">{{.Metric.ShellBlock}}</span></div>{{end}}
 
 <div class="section-label">i/o</div>
 <div class="field"><span class="label">input_size</span><span class="val yellow">{{.Metric.InputSizeHuman}} ({{.Metric.TotalInputSize}} bytes)</span></div>
 {{if .Metric.NumInputs}}<div class="field"><span class="label">num_inputs</span><span class="val">{{.Metric.NumInputs}}</span></div>{{end}}
 <div class="field"><span class="label">input_type</span><span class="val">{{.Metric.InputTypeList}}</span></div>
 {{if .Metric.TotalOutputSize}}<div class="field"><span class="label">output_size</span><span class="val yellow">{{.Metric.OutputSizeHuman}} ({{.Metric.TotalOutputSize}} bytes)</span></div>{{end}}
+{{if .Metric.NumOutputs}}<div class="field"><span class="label">num_outputs</span><span class="val">{{.Metric.NumOutputs}}</span></div>{{end}}
 
 <div class="section-label">performance</div>
 <div class="field"><span class="label">runtime</span><span class="val green">{{printf "%.2f" .Metric.RuntimeSec}}s</span></div>
@@ -505,8 +570,59 @@ const recordTmpl = `<!DOCTYPE html>
 <div class="section-label">metadata</div>
 <div class="field"><span class="label">timestamp</span><span class="val">{{.Metric.Timestamp.Format "2006-01-02 15:04:05 UTC"}}</span></div>
 
-<div style="margin-top: 2rem;">
-  <a href="/record/{{.Metric.RecordID}}/json" class="theme-toggle" style="text-decoration:none; display:inline-block;">download json</a>
+</div>
+
+<div class="record-panel">
+  {{if .Metric.Inputs}}
+  <details class="detail-box" open>
+    <summary>inputs ({{.Metric.NumInputs}})</summary>
+    <div class="detail-content">{{.Metric.Inputs}}</div>
+  </details>
+  {{end}}
+
+  {{if .Metric.Outputs}}
+  <details class="detail-box">
+    <summary>outputs ({{.Metric.NumOutputs}})</summary>
+    <div class="detail-content">{{.Metric.Outputs}}</div>
+  </details>
+  {{end}}
+
+  {{if .Metric.ShellBlock}}
+  <details class="detail-box">
+    <summary>shell block</summary>
+    <div class="detail-content">{{.Metric.ShellBlock}}</div>
+  </details>
+  {{end}}
+
+  {{if .Metric.Parameters}}
+  <details class="detail-box">
+    <summary>params (full)</summary>
+    <div class="detail-content">{{.Metric.Parameters}}</div>
+  </details>
+  {{end}}
+
+  {{if .Metric.Resources}}
+  <details class="detail-box">
+    <summary>resources</summary>
+    <div class="detail-content">{{.Metric.Resources}}</div>
+  </details>
+  {{end}}
+
+  {{with envFeatures .Env}}
+  <details class="detail-box">
+    <summary>cpu features</summary>
+    <div class="detail-content">{{.}}</div>
+  </details>
+  {{end}}
+
+  {{if .Env.KernelString}}
+  <details class="detail-box">
+    <summary>kernel string</summary>
+    <div class="detail-content">{{.Env.KernelString}}</div>
+  </details>
+  {{end}}
+</div>
+
 </div>
 
 <div class="page-footer">
@@ -531,10 +647,9 @@ const envTmpl = `<!DOCTYPE html>
 
 <div class="header">
   <div class="header-row">
-    <h1><span>psb</span> // environment detail</h1>
+    <h1><a href="/" style="color:var(--accent);text-decoration:none;">psb</a> // environment detail</h1>
     <button class="theme-toggle" onclick="toggleTheme()">theme</button>
   </div>
-  <div class="nav"><a href="/">&larr; back</a></div>
 </div>
 
 <div class="section-label">environment</div>
@@ -617,6 +732,14 @@ var templates = template.Must(
 		"envFeatures": func(e models.Environment) string {
 			return envFeatureStr(e)
 		},
+		"trimGH": func(s string) string {
+			for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
+				if len(s) > len(prefix) && s[:len(prefix)] == prefix {
+					return s[len(prefix):]
+				}
+			}
+			return s
+		},
 	}).Parse(viewTmpl +
 		`{{define "session"}}` + sessionTmpl + `{{end}}` +
 		`{{define "record"}}` + recordTmpl + `{{end}}` +
@@ -695,7 +818,7 @@ func windowedPages(current, total int, urlFn func(int) string) []PageItem {
 func buildFilterURL(params map[string]string) string {
 	u := "/"
 	sep := "?"
-	for _, k := range []string{"tool", "platform", "sm"} {
+	for _, k := range []string{"tool", "platform", "sm", "workflow"} {
 		if v := params[k]; v != "" {
 			u += sep + k + "=" + v
 			sep = "&"
@@ -713,6 +836,7 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 	toolFilter := c.QueryParam("tool")
 	platformFilter := c.QueryParam("platform")
 	smFilter := c.QueryParam("sm")
+	workflowFilter := c.QueryParam("workflow")
 
 	// Load all environments for mapping
 	var envs []models.Environment
@@ -739,6 +863,12 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 		eq.Pluck("id", &filteredEnvIDs)
 	}
 
+	// Resolve workflow filter to session IDs
+	var filteredSessionIDs []string
+	if workflowFilter != "" {
+		h.DB.Model(&models.Session{}).Where("workflow_url = ?", workflowFilter).Pluck("session_id", &filteredSessionIDs)
+	}
+
 	// Build base query
 	query := h.DB.Model(&models.ExecutionMetric{}).Where("exit_code = 0")
 	if toolFilter != "" {
@@ -746,6 +876,9 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 	}
 	if hasEnvFilter {
 		query = query.Where("environment_id IN ?", filteredEnvIDs)
+	}
+	if workflowFilter != "" {
+		query = query.Where("session_id IN ?", filteredSessionIDs)
 	}
 
 	var total int64
@@ -766,10 +899,13 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 	if hasEnvFilter {
 		q = q.Where("environment_id IN ?", filteredEnvIDs)
 	}
+	if workflowFilter != "" {
+		q = q.Where("session_id IN ?", filteredSessionIDs)
+	}
 	q.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&metrics)
 
 	// Build page items with pre-computed URLs (windowed, Google-style)
-	filterParams := map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": smFilter}
+	filterParams := map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": smFilter, "workflow": workflowFilter}
 	pageItems := windowedPages(page, totalPages, func(p int) string {
 		u := buildFilterURL(filterParams)
 		if u == "/" {
@@ -795,7 +931,7 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 		topPlatforms[i] = StatItem{
 			Name:  r.OS,
 			Count: r.Count,
-			URL:   buildFilterURL(map[string]string{"tool": toolFilter, "platform": r.OS, "sm": smFilter}),
+			URL:   buildFilterURL(map[string]string{"tool": toolFilter, "platform": r.OS, "sm": smFilter, "workflow": workflowFilter}),
 		}
 	}
 
@@ -816,31 +952,83 @@ func (h *Handler) ViewTelemetry(c echo.Context) error {
 		topSnakemake[i] = StatItem{
 			Name:  r.SnakemakeVersion,
 			Count: r.Count,
-			URL:   buildFilterURL(map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": r.SnakemakeVersion}),
+			URL:   buildFilterURL(map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": r.SnakemakeVersion, "workflow": workflowFilter}),
+		}
+	}
+
+	// Top workflow URLs by metric count
+	type wfRow struct {
+		WorkflowURL string
+		Count       int64
+	}
+	var wfRows []wfRow
+	h.DB.Model(&models.ExecutionMetric{}).
+		Select("s.workflow_url as workflow_url, count(*) as count").
+		Joins("JOIN sessions s ON s.session_id = execution_metrics.session_id").
+		Where("exit_code = 0 AND s.workflow_url != ''").
+		Group("s.workflow_url").Order("count DESC").Limit(10).
+		Find(&wfRows)
+	topWorkflows := make([]StatItem, len(wfRows))
+	for i, r := range wfRows {
+		topWorkflows[i] = StatItem{
+			Name:  r.WorkflowURL,
+			Count: r.Count,
+			URL:   buildFilterURL(map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": smFilter, "workflow": r.WorkflowURL}),
 		}
 	}
 
 	// Pre-build clear URLs
-	clearToolURL := buildFilterURL(map[string]string{"platform": platformFilter, "sm": smFilter})
-	clearPlatformURL := buildFilterURL(map[string]string{"tool": toolFilter, "sm": smFilter})
-	clearSmURL := buildFilterURL(map[string]string{"tool": toolFilter, "platform": platformFilter})
+	clearToolURL := buildFilterURL(map[string]string{"platform": platformFilter, "sm": smFilter, "workflow": workflowFilter})
+	clearPlatformURL := buildFilterURL(map[string]string{"tool": toolFilter, "sm": smFilter, "workflow": workflowFilter})
+	clearSmURL := buildFilterURL(map[string]string{"tool": toolFilter, "platform": platformFilter, "workflow": workflowFilter})
+	clearWorkflowURL := buildFilterURL(map[string]string{"tool": toolFilter, "platform": platformFilter, "sm": smFilter})
+
+	// If tool filter is active, find the last available ISO week for parquet download
+	// Find last available ISO week for parquet export (tool or workflow filter)
+	var parquetWeek string
+	findLastWeek := func(where string, args ...interface{}) string {
+		var ts *string
+		row := h.DB.Model(&models.ExecutionMetric{}).Where(where, args...).Select("MAX(timestamp)").Row()
+		if err := row.Scan(&ts); err != nil || ts == nil {
+			return ""
+		}
+		for _, f := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05", "2006-01-02T15:04:05Z"} {
+			if t, err := time.Parse(f, *ts); err == nil {
+				y, w := t.ISOWeek()
+				return fmt.Sprintf("%d-W%02d", y, w)
+			}
+		}
+		return ""
+	}
+	if toolFilter != "" {
+		parquetWeek = findLastWeek("tool = ? AND exit_code = 0", toolFilter)
+	}
+	var workflowParquetWeek string
+	if workflowFilter != "" {
+		workflowParquetWeek = findLastWeek("session_id IN ? AND exit_code = 0", filteredSessionIDs)
+	}
 
 	data := map[string]interface{}{
-		"EnvMap":           envMap,
-		"EnvHashMap":       envHashMap,
-		"Metrics":          metrics,
-		"CurrentPage":      page,
-		"TotalPages":       totalPages,
-		"TotalMetrics":     fmt.Sprintf("%d", total),
-		"PageItems":        pageItems,
-		"ToolFilter":       toolFilter,
-		"PlatformFilter":   platformFilter,
-		"SmFilter":         smFilter,
-		"TopPlatforms":     topPlatforms,
-		"TopSnakemake":     topSnakemake,
-		"ClearToolURL":     clearToolURL,
-		"ClearPlatformURL": clearPlatformURL,
-		"ClearSmURL":       clearSmURL,
+		"EnvMap":              envMap,
+		"EnvHashMap":          envHashMap,
+		"Metrics":             metrics,
+		"CurrentPage":         page,
+		"TotalPages":          totalPages,
+		"TotalMetrics":        fmt.Sprintf("%d", total),
+		"PageItems":           pageItems,
+		"ToolFilter":          toolFilter,
+		"PlatformFilter":      platformFilter,
+		"SmFilter":            smFilter,
+		"WorkflowFilter":      workflowFilter,
+		"TopPlatforms":        topPlatforms,
+		"TopSnakemake":        topSnakemake,
+		"TopWorkflows":        topWorkflows,
+		"ClearToolURL":        clearToolURL,
+		"ClearPlatformURL":    clearPlatformURL,
+		"ClearSmURL":          clearSmURL,
+		"ClearWorkflowURL":    clearWorkflowURL,
+		"ParquetWeek":         parquetWeek,
+		"WorkflowParquetWeek": workflowParquetWeek,
 	}
 
 	c.Response().Header().Set("Content-Type", "text/html")
@@ -924,9 +1112,13 @@ func (h *Handler) ViewRecord(c echo.Context) error {
 	var env models.Environment
 	h.DB.First(&env, metric.EnvironmentID)
 
+	var sess models.Session
+	h.DB.Where("session_id = ?", metric.SessionID).First(&sess)
+
 	data := map[string]interface{}{
-		"Metric": metric,
-		"Env":    env,
+		"Metric":  metric,
+		"Env":     env,
+		"Session": sess,
 	}
 
 	c.Response().Header().Set("Content-Type", "text/html")
@@ -1243,10 +1435,11 @@ func parseISOWeek(s string) (start, end time.Time, err error) {
 
 func (h *Handler) DownloadToolWeekParquet(c echo.Context) error {
 	tool := c.QueryParam("tool")
+	workflow := c.QueryParam("workflow")
 	week := c.QueryParam("week")
 
-	if tool == "" {
-		return c.String(http.StatusBadRequest, "tool parameter is required")
+	if tool == "" && workflow == "" {
+		return c.String(http.StatusBadRequest, "tool or workflow parameter is required")
 	}
 	if week == "" {
 		return c.String(http.StatusBadRequest, "week parameter is required (format: YYYY-Www, e.g. 2026-W11)")
@@ -1257,11 +1450,24 @@ func (h *Handler) DownloadToolWeekParquet(c echo.Context) error {
 		return c.String(http.StatusBadRequest, err.Error())
 	}
 
+	query := h.DB.Where("timestamp >= ? AND timestamp <= ?", weekStart, weekEnd)
+	if tool != "" {
+		query = query.Where("tool = ?", tool)
+	}
+	if workflow != "" {
+		var sessionIDs []string
+		h.DB.Model(&models.Session{}).Where("workflow_url = ?", workflow).Pluck("session_id", &sessionIDs)
+		query = query.Where("session_id IN ?", sessionIDs)
+	}
+
 	var metrics []models.ExecutionMetric
-	h.DB.Where("tool = ? AND timestamp >= ? AND timestamp <= ?", tool, weekStart, weekEnd).
-		Order("id ASC").Find(&metrics)
+	query.Order("id ASC").Find(&metrics)
 	if len(metrics) == 0 {
-		return c.String(http.StatusNotFound, fmt.Sprintf("no records for tool %q in week %s", tool, week))
+		label := tool
+		if label == "" {
+			label = workflow
+		}
+		return c.String(http.StatusNotFound, fmt.Sprintf("no records for %q in week %s", label, week))
 	}
 
 	rows := buildParquetRows(metrics, h.buildEnvMap(metrics), h.buildSessionMap(metrics))
@@ -1275,7 +1481,20 @@ func (h *Handler) DownloadToolWeekParquet(c echo.Context) error {
 		return c.String(http.StatusInternalServerError, "failed to close parquet writer")
 	}
 
-	filename := fmt.Sprintf("%s-%s.parquet", tool, week)
+	name := tool
+	if name == "" {
+		// Use last path segment of workflow URL as filename prefix
+		name = workflow
+		if idx := len(name) - 1; idx >= 0 {
+			for i := len(name) - 1; i >= 0; i-- {
+				if name[i] == '/' {
+					name = name[i+1:]
+					break
+				}
+			}
+		}
+	}
+	filename := fmt.Sprintf("%s-%s.parquet", name, week)
 	c.Response().Header().Set("Content-Type", "application/octet-stream")
 	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	return c.Blob(http.StatusOK, "application/octet-stream", buf.Bytes())
