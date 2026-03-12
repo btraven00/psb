@@ -261,7 +261,7 @@ const viewTmpl = `<!DOCTYPE html>
     <tr>
       <th>session</th><th>record</th><th>platform</th><th>tool</th><th>command</th>
       <th>input</th><th>type</th><th>runtime</th><th>rss_mb</th>
-      <th>cpu%</th><th>timestamp</th>
+      <th>cpu</th><th>timestamp</th>
     </tr>
     {{range .Metrics}}
     <tr>
@@ -317,7 +317,7 @@ const sessionTmpl = `<!DOCTYPE html>
     <h1><span>psb</span> // session detail</h1>
     <button class="theme-toggle" onclick="toggleTheme()">theme</button>
   </div>
-  <div class="nav"><a href="/">&larr; back to listing</a></div>
+  <div class="nav"><a href="/">&larr; back</a></div>
 </div>
 
 <div class="section-label">session</div>
@@ -333,17 +333,16 @@ const sessionTmpl = `<!DOCTYPE html>
 <div class="section-label">records</div>
 <table>
   <tr>
-    <th>#</th><th>record</th><th>tool</th><th>command</th><th>params</th>
+    <th>record</th><th>tool</th><th>command</th><th>params</th>
     <th>input</th><th>type</th><th>runtime</th><th>rss_mb</th>
-    <th>cpu%</th><th>exit</th><th>timestamp</th>
+    <th>cpu</th><th>exit</th><th>timestamp</th>
   </tr>
   {{range .Metrics}}
   <tr>
-    <td class="id">{{.ID}}</td>
     <td class="record"><a href="/record/{{.RecordID}}">{{.RecordID}}</a></td>
     <td class="tool"><a href="/?tool={{.Tool}}">{{.Tool}}</a></td>
     <td class="cmd">{{.CommandPattern}}</td>
-    <td class="param">{{.Parameters}}</td>
+    <td class="param" title="{{.Parameters}}">{{truncate .Parameters 60}}</td>
     <td class="size">{{.InputSizeHuman}}</td>
     <td>{{.InputTypeClean}}</td>
     <td class="time">{{printf "%.2f" .RuntimeSec}}s</td>
@@ -353,7 +352,7 @@ const sessionTmpl = `<!DOCTYPE html>
     <td class="ts">{{.Timestamp.Format "2006-01-02 15:04:05"}}</td>
   </tr>
   {{else}}
-  <tr><td colspan="12" class="empty">-- no records --</td></tr>
+  <tr><td colspan="11" class="empty">-- no records --</td></tr>
   {{end}}
 </table>
 
@@ -394,7 +393,7 @@ const recordTmpl = `<!DOCTYPE html>
     <button class="theme-toggle" onclick="toggleTheme()">theme</button>
   </div>
   <div class="nav">
-    <a href="/">&larr; listing</a>
+    <a href="/">&larr; back</a>
     &middot;
     <a href="/session/{{.Metric.SessionID}}">&larr; session {{.Metric.SessionID}}</a>
   </div>
@@ -403,12 +402,11 @@ const recordTmpl = `<!DOCTYPE html>
 <div class="section-label">identification</div>
 <div class="field"><span class="label">record_id</span><span class="val">{{.Metric.RecordID}}</span></div>
 <div class="field"><span class="label">session_id</span><span class="val yellow"><a href="/session/{{.Metric.SessionID}}">{{.Metric.SessionID}}</a></span></div>
-<div class="field"><span class="label">internal_id</span><span class="val">{{.Metric.ID}}</span></div>
 
 <div class="section-label">environment</div>
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
-<div class="field"><span class="label">cpu_flags</span><span class="val">{{.Env.CPUFlags}}</span></div>
+<div class="field"><span class="label">cpu_flags</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{if gt (len .Env.CPUFlags) 120}}<span id="cpu-flags-short">{{truncate .Env.CPUFlags 120}} <a href="#" onclick="document.getElementById('cpu-flags-short').style.display='none';document.getElementById('cpu-flags-full').style.display='inline';return false;" style="font-size:10px;color:var(--accent);">[see all]</a></span><span id="cpu-flags-full" style="display:none;word-break:break-all;">{{.Env.CPUFlags}}</span>{{else}}{{.Env.CPUFlags}}{{end}}</span></div>
 <div class="field"><span class="label">os</span><span class="val">{{.Env.OS}}</span></div>
 <div class="field"><span class="label">kernel</span><span class="val">{{.Env.KernelVersion}}</span></div>
 <div class="field"><span class="label">kernel_string</span><span class="val">{{.Env.KernelString}}</span></div>
@@ -427,7 +425,7 @@ const recordTmpl = `<!DOCTYPE html>
 <div class="section-label">performance</div>
 <div class="field"><span class="label">runtime</span><span class="val green">{{printf "%.2f" .Metric.RuntimeSec}}s</span></div>
 <div class="field"><span class="label">max_rss</span><span class="val">{{printf "%.1f" .Metric.MaxRSS}} MB</span></div>
-<div class="field"><span class="label">cpu%</span><span class="val">{{printf "%.1f" .Metric.AvgCPUPercent}}%</span></div>
+<div class="field"><span class="label">cpu</span><span class="val">{{printf "%.1f" .Metric.AvgCPUPercent}}%</span></div>
 <div class="field"><span class="label">exit_code</span><span class="val {{if eq .Metric.ExitCode 0}}green{{else}}red{{end}}">{{.Metric.ExitCode}}</span></div>
 
 <div class="section-label">metadata</div>
@@ -458,14 +456,14 @@ const envTmpl = `<!DOCTYPE html>
     <h1><span>psb</span> // environment detail</h1>
     <button class="theme-toggle" onclick="toggleTheme()">theme</button>
   </div>
-  <div class="nav"><a href="/">&larr; back to listing</a></div>
+  <div class="nav"><a href="/">&larr; back</a></div>
 </div>
 
 <div class="section-label">environment</div>
 <div class="field"><span class="label">hash</span><span class="val">{{.Env.Hash}}</span></div>
 <div class="field"><span class="label">host</span><span class="val">{{.Env.ShortHash}}</span></div>
 <div class="field"><span class="label">cpu</span><span class="val">{{.Env.CPUModel}}</span></div>
-<div class="field"><span class="label">cpu_flags</span><span class="val">{{.Env.CPUFlags}}</span></div>
+<div class="field"><span class="label">cpu_flags</span><span class="val" style="font-size:10px;word-break:break-all;max-width:600px;">{{.Env.CPUFlags}}</span></div>
 <div class="field"><span class="label">os</span><span class="val">{{.Env.OS}}</span></div>
 <div class="field"><span class="label">kernel</span><span class="val">{{.Env.KernelVersion}}</span></div>
 <div class="field"><span class="label">kernel_string</span><span class="val">{{.Env.KernelString}}</span></div>
@@ -477,7 +475,7 @@ const envTmpl = `<!DOCTYPE html>
   <tr>
     <th>session</th><th>record</th><th>tool</th><th>command</th>
     <th>input</th><th>type</th><th>runtime</th><th>rss_mb</th>
-    <th>cpu%</th><th>exit</th><th>timestamp</th>
+    <th>cpu</th><th>exit</th><th>timestamp</th>
   </tr>
   {{range .Metrics}}
   <tr>
@@ -516,7 +514,14 @@ const envTmpl = `<!DOCTYPE html>
 // Template compilation
 // ============================================================
 var templates = template.Must(
-	template.New("").Parse(viewTmpl +
+	template.New("").Funcs(template.FuncMap{
+		"truncate": func(s string, n int) string {
+			if len(s) <= n {
+				return s
+			}
+			return s[:n] + "…"
+		},
+	}).Parse(viewTmpl +
 		`{{define "session"}}` + sessionTmpl + `{{end}}` +
 		`{{define "record"}}` + recordTmpl + `{{end}}` +
 		`{{define "env"}}` + envTmpl + `{{end}}`),
