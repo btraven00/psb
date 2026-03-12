@@ -16,8 +16,14 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-// CommitHash is set at build time via ldflags, with runtime VCS fallback.
+// commitHash is set at build time via ldflags.
+var commitHash string
+
+// CommitHash returns the build commit hash, falling back to VCS info or "dev".
 var CommitHash = func() string {
+	if commitHash != "" {
+		return commitHash
+	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, s := range info.Settings {
 			if s.Key == "vcs.revision" && s.Value != "" {
