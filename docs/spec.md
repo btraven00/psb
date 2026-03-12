@@ -3,137 +3,384 @@
 | | |
 |---|---|
 | **Version** | 0.1.0-draft |
-| **Status** | MVP / Experimental |
+| **Status** | experimental |
 | **Date** | 2026-03-12 |
 | **Authors** | btraven, ... |
 
 ## 1. Introduction
 
-The Planetary Scale Benchmark (PSB) is a crowd-sourced benchmarking system for tools commonly used in scientific workflows. Clients running Snakemake workflows voluntarily submit performance telemetry to a central ingestion service. The aggregated data enables cross-environment comparison of tool performance at global scale.
+The Planetary Scale Benchmark (PSB) is a crowd-sourced benchmarking system for scientific workflow tools. Clients running Snakemake workflows voluntarily submit performance telemetry to a central ingestion service. The aggregated data enables cross-environment comparison of tool performance at global scale.
 
-This document specifies the wire protocol, data model, ingestion API, and client responsibilities for the MVP implementation.
+This document specifies the data model, submission protocol, and client responsibilities.
 
 ## 2. Terminology
 
 | Term | Definition |
 |------|-----------|
-| **Session** | A single Snakemake workflow invocation (one `snakemake` run). Identified by `session_id`. |
-| **Record** | Performance metrics for a single rule execution within a session. |
-| **Environment** | A fingerprint of the execution platform (hardware, OS, Snakemake version). |
-| **Tool** | The primary scientific tool invoked by a rule (e.g., `samtools`, `bwa`, `minimap2`, `STAR`). |
+| **Session** | A single workflow invocation. Identified by `session_id` (UUIDv4). |
+| **Observation** | Performance data for one rule execution within a session. |
+| **Environment** | A fingerprint of the execution platform (hardware, OS, runtime version). |
+| **Tool** | The primary scientific tool invoked by a rule (e.g. `samtools`, `bwa`, `STAR`). |
+| **Command** | The detected or annotated command being benchmarked. May be a subcommand of the tool (e.g. `sort` for `samtools sort`), an entrypoint script (e.g. `scripts/normalize.py`), or — in pipelines — the specific stage the user designates via annotation. |
 
-## 3. Data Model
+---
 
-### 3.1 Session
+## Part I: Data Model
 
-A session represents one Snakemake invocation. The `session_id` is a client-generated UUIDv4, created at workflow start and reused for all records in that run.
+The data model defines three independent entities. None of these carry transport or authentication concerns.
+
+### 3. Session
+
+A session represents one workflow invocation.
+
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Session ID | `session_id` | string | Client-generated UUIDv4, created at workflow start |
+| Workflow URL | `workflow_url` | string | Repository or release URL (scheme + host + path only, no query/fragment/auth). Optional. |
+| Workflow version | `workflow_version` | string | Version tag (e.g. `v1.2.0`, `main@abc1234`). Optional. |
+
+The client reads `workflow_url` and `workflow_version` from the workflow config `psb:` section (see Section 8).
+
+### 4. Observation
+
+An observation captures performance data for a single rule execution.
+
+#### 4.1 Record ID
 
 ```
-session_id: string (UUIDv4, e.g. "a3f1c9e0-7b2d-4e8a-b5c1-9d0e3f2a1b4c")
+record_id = SHA256(session_start_iso + ":" + rule_name + ":" + wildcards_str)[:16]
 ```
 
-### 3.2 Record
+`wildcards_str` is sorted, comma-separated `key=value` pairs (empty string if none). The session start timestamp makes the ID deterministic within a session and idempotent across resubmissions.
 
-A record captures metrics for a single rule execution. Each record is submitted as one JSON line.
+#### 4.2 Required Fields
 
-**Record ID derivation:**
-
-```
-record_id = SHA256(session_start_timestamp + ":" + rule_name + ":" + wildcards_str)[:16]
-```
-
-where `wildcards_str` is the sorted, comma-separated `key=value` pairs of the job's wildcards (empty string if no wildcards). For example, a rule `align` with wildcards `{sample: "A", lane: "L1"}` produces `wildcards_str = "lane=L1,sample=A"`.
-
-The record ID is a hex-encoded truncated hash, deterministic within a session. Using the session start timestamp (rather than the current time) ensures that re-running the same rule with the same wildcards produces the same record ID, making submissions idempotent.
-
-**Required fields (bare minimum for valid ingestion):**
-
-| Field | JSON key | Type | Description |
-|-------|----------|------|-------------|
-| Session ID | `session_id` | string | UUIDv4 of the current Snakemake run |
-| Record ID | `record_id` | string | Hash of `session_start:rule_name` |
-| Tool | `tool` | string | Tool label (see Section 3.4) |
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Record ID | `record_id` | string | Hex-encoded truncated hash (see above) |
+| Tool | `tool` | string | Tool label (see Section 6) |
 | Runtime | `runtime_sec` | float | Wall-clock seconds, must be > 0 |
 | Max RSS | `max_rss_mb` | float | Peak resident set size in MiB |
-| CPU usage | `cpu_percent` | float | Average CPU utilization (e.g. 350.0 = 3.5 cores) |
+| CPU usage | `cpu_percent` | float | Cumulative CPU-seconds (e.g. 380.0 for ~4 cores fully utilized) |
 
-**Optional fields:**
+#### 4.3 Optional Fields
 
-| Field | JSON key | Type | Description |
-|-------|----------|------|-------------|
-| Command | `command` | string | The shell command (e.g. `samtools sort`) |
-| Parameters | `params` | string | Sanitized arguments (see Section 5.1) |
-| Input size | `input_size` | int64 | Total size of all input files in bytes |
-| Num inputs | `num_inputs` | int | Number of input files |
-| Input type | `input_type` | string | Comma-separated unique file extensions of inputs (e.g. `.fastq.gz,.fa,.bed`) |
-| Output size | `output_size` | int64 | Total size of all output files in bytes |
-| Threads | `threads` | int | Number of threads allocated to this job by Snakemake |
+**Tool context:**
+
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Command | `command` | string | Shell command or subcommand (e.g. `samtools sort`) |
+| Parameters | `params` | string | Sanitized arguments (see Section 10.1) |
+| Shell block | `shell_block` | string | Full unresolved shell template from the rule (see Section 7) |
+| Tool version | `tool_version` | string | Version of the primary tool (e.g. `1.21`) |
+| Category | `category` | string | Workflow step category for cross-method aggregation (e.g. `alignment`) |
+
+<!-- INPUT NEEDED: Should `category` be a single string or replaced with a `tags` list for more flexible classification? -->
+
+**I/O:**
+
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Inputs | `inputs` | array\<FileEntry\> | Per-file `{"type": string, "size": int64}` (see Section 5) |
+| Outputs | `outputs` | array\<FileEntry\> | Per-file `{"type": string, "size": int64}` |
+
+**Resources:**
+
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Threads | `threads` | int | Threads allocated by Snakemake |
+| Resources | `resources` | string | JSON-encoded dict of resource allocations (e.g. `{"_cores":4,"mem_mb":8000}`) |
 | Exit code | `exit_code` | int | Process exit code (0 = success) |
-| Load average | `load_avg` | float | 1-minute load average at job start |
-| Memory available | `mem_avail_mb` | int | Available memory in MB at job start |
-| Swap used | `swap_used_mb` | int | Swap in use in MB at job start |
-| I/O wait | `io_wait_pct` | float | I/O wait percentage during the job (Linux only, 0 on other platforms) |
 
-**Nonce (required by gate check, see Section 6):**
+**Extended memory/IO (from `psutil` process monitoring):**
 
-The `X-PSB-Nonce` header carries a random string generated per-request (not per-record). It is not included in the JSONL record body.
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Max VMS | `max_vms_mb` | float | Peak virtual memory size in MiB |
+| Max USS | `max_uss_mb` | float | Peak unique set size in MiB |
+| Max PSS | `max_pss_mb` | float | Peak proportional set size in MiB |
+| I/O read | `io_in_mb` | float | Cumulative bytes read in MiB |
+| I/O written | `io_out_mb` | float | Cumulative bytes written in MiB |
+| CPU time | `cpu_time_sec` | float | CPU time (user + system) in seconds |
 
-### 3.3 Environment
+**System state (distress metrics):**
 
-The environment is a manifest of the execution platform, submitted inline with each record. The server deduplicates environments by a deterministic hash.
+These flag potentially unreliable measurements. A job that ran under memory pressure or I/O contention may have inflated runtimes.
 
-| Field | JSON key | Type | Description |
-|-------|----------|------|-------------|
-| Host hash | `host_hash` | string | SHA256 hex digest of the hostname |
-| CPU model | `cpu_model` | string | CPU model string (e.g. `Intel Xeon E5-2680 v4`, `Apple M2 Pro`) |
-| CPU features | `cpu_features` | uint64 | Bitmask of curated CPU feature flags (see Section 3.6) |
-| CPU cores | `cpu_cores` | int | Physical CPU core count |
+| Field | Key | Type | Capture | Description |
+|-------|-----|------|---------|-------------|
+| Load average | `load_avg` | float | Job start | 1-min load average. Values >> `cpu_cores` indicate contention. |
+| Memory available | `mem_avail_mb` | int | Job start | Available memory in MB |
+| Swap used | `swap_used_mb` | int | Job start | Swap in use in MB. Non-zero is a red flag. |
+| I/O wait | `io_wait_pct` | float | Delta over job | CPU time % waiting for I/O. Linux only (0 elsewhere). |
+
+### 5. File Entries
+
+Each element in `inputs`/`outputs` arrays:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | File extension, preserving compound extensions (e.g. `.fastq.gz`). Empty string if none. |
+| `size` | int64 | File size in bytes. 0 if not stat-able. |
+
+All files are included (no filtering of index/auxiliary files).
+
+### 6. Tool Inference
+
+The `tool` field identifies the primary scientific tool. Resolution order:
+
+1. **Explicit annotation:** If the rule sets `_psb_tool` (see Section 8), use that value. If the annotation names a generic interpreter, the observation MUST be dropped.
+2. **Auto-detection:** Parse the shell template. Skip leading generic interpreter tokens and use the first non-interpreter token. If none remains, drop.
+3. **Drop rule:** The observation is dropped whenever the resolved tool is a generic interpreter or auto-detection yields no non-interpreter token.
+
+Generic interpreters: `python`, `python3`, `bash`, `sh`, `Rscript`, `perl`, `java`, `ruby`.
+
+### 7. Shell Block
+
+The `shell_block` field stores the full shell template with Snakemake placeholders (`{input}`, `{output}`, `{threads}`, etc.) unresolved. This avoids path leakage while preserving the complete picture for pipelines and multi-command rules.
+
+This complements `command` (tool/subcommand) and `params` (arguments for the primary command, which may be just one segment of a pipe).
+
+### 8. PSB Annotations
+
+Workflow authors annotate rules via the `_psb_*` param namespace.
+
+**Rule-level (via `params:`):**
+
+| Param key | Observation field | Behavior |
+|-----------|-------------------|----------|
+| `_psb_tool` | `tool` | Replaces auto-detected tool name |
+| `_psb_tool_version` | `tool_version` | Tool version string |
+| `_psb_primary_cmd` | `command` | Replaces auto-detected command |
+| `_psb_params` | `params` | Replaces auto-detected params |
+| `_psb_category` | `category` | Workflow step category |
+
+<!-- INPUT NEEDED: What's the expected format for `_psb_params`? Free-form string? Key-value pairs? -->
+<!-- INPUT NEEDED: `_psb_tool_version` — should this be user-specified or auto-resolved from the environment (e.g. via a callback)? If auto-resolved, this becomes a future improvement. -->
+
+**Workflow-level defaults (via `config.yaml`):**
+
+```yaml
+psb:
+  workflow_url: "https://github.com/org/my-workflow"
+  workflow_version: "v1.2.0"
+  category: "single-cell clustering"
+```
+
+`workflow_url` and `workflow_version` are session-level (Section 3). Other keys are defaults that rule-level params override.
+
+**Precedence:** rule-level `_psb_*` param > workflow config `psb.*` > auto-detection.
+
+**When `_psb_primary_cmd` is set:** auto-detected `params` is cleared (it was derived from the original first shell line). Set `_psb_params` explicitly if needed.
+
+**Examples:**
+
+```python
+rule sort_bam:
+    params:
+        _psb_tool="samtools",
+        _psb_primary_cmd="sort",
+        _psb_category="alignment",
+    shell: "samtools sort -@ {threads} {input} -o {output}"
+
+rule align_and_sort:
+    params:
+        _psb_tool="samtools",
+        _psb_primary_cmd="samtools sort",
+        _psb_category="alignment",
+    shell:
+        "bwa mem -t {threads} {input.ref} {input.r1} {input.r2} | "
+        "samtools sort -@ {threads} -o {output}"
+
+# Cross-method comparison via shared category
+rule scgpt_normalize:
+    params:
+        _psb_tool="scgpt",
+        _psb_category="normalization",
+    shell: "python scripts/scgpt_norm.py {input} {output}"
+
+rule scvi_normalize:
+    params:
+        _psb_tool="scvi-tools",
+        _psb_category="normalization",
+    shell: "python scripts/scvi_norm.py {input} {output}"
+```
+
+Without annotations, auto-detection on the last two rules would skip `python` and resolve to the script path, which is not meaningful.
+
+### 9. Environment
+
+A fingerprint of the execution platform. The server deduplicates by a deterministic hash.
+
+| Field | Key | Type | Description |
+|-------|-----|------|-------------|
+| Host hash | `host_hash` | string | SHA256 of hostname |
+| CPU model | `cpu_model` | string | e.g. `Intel Xeon E5-2680 v4` |
+| CPU features | `cpu_features` | uint64 | Bitmask of curated flags (see Appendix A) |
+| CPU cores | `cpu_cores` | int | Physical core count |
 | L2 cache | `l2_cache_kb` | int | L2 cache size in KB |
 | L3 cache | `l3_cache_kb` | int | L3 cache size in KB |
 | CPU frequency | `cpu_freq_mhz` | int | Max CPU frequency in MHz |
-| Platform | `os` | string | One of: `linux`, `darwin`, `freebsd`, `windows` |
-| Kernel version | `kernel_version` | string | Numeric kernel version (e.g. `6.1.0`) |
-| Kernel string | `kernel_string` | string | Full kernel version string (e.g. `Linux 6.1.0-25-amd64`) |
-| Snakemake version | `sm_version` | string | Snakemake version (e.g. `8.25.5`) |
-| Deployment mode | `deploy_mode` | string | Deployment method(s) in use (see Section 3.7) |
+| Platform | `os` | string | `linux`, `darwin`, `freebsd`, or `windows` |
+| Kernel version | `kernel_version` | string | Numeric kernel version |
+| Kernel string | `kernel_string` | string | Full platform string |
+| Runtime version | `sm_version` | string | Snakemake version |
+| Deployment mode | `deploy_mode` | string | See Appendix B |
 
-**Deprecated fields (backward compatibility):**
-
-| Field | JSON key | Type | Description |
-|-------|----------|------|-------------|
-| CPU flags | `cpu_flags` | string | Raw comma-separated CPU flags. Replaced by `cpu_features` bitmask. Old clients may still send this; the server auto-encodes it to the bitmask. |
-
-**Environment hash derivation:**
+**Environment hash:**
 
 ```
-hash = SHA256("host_hash={host_hash}\ncpu_model={cpu_model}\ncpu_flags={cpu_flags}\ncpu_features={cpu_features}\ncpu_cores={cpu_cores}\nl2={l2_cache_kb}\nl3={l3_cache_kb}\nfreq={cpu_freq_mhz}\nos={os}\nkernel={kernel_version}\nkernel_string={kernel_string}\nsm={sm_version}\ndeploy={deploy_mode}")
+SHA256("host_hash={host_hash}\ncpu_model={cpu_model}\ncpu_features={cpu_features}\ncpu_cores={cpu_cores}\nl2={l2_cache_kb}\nl3={l3_cache_kb}\nfreq={cpu_freq_mhz}\nos={os}\nkernel={kernel_version}\nkernel_string={kernel_string}\nsm={sm_version}\ndeploy={deploy_mode}")
 ```
 
-The server uses this hash as a unique index. Environments with the same hash are stored once.
+**Deprecated:** `cpu_flags` (raw string). If sent without `cpu_features`, the server auto-encodes to the bitmask.
 
-### 3.4 Tool Inference
+---
 
-The `tool` field is a human-readable label identifying the scientific tool.
+## Part II: Submission Protocol
 
-- If the workflow provides an explicit tool label, use it.
-- If not provided, derive `tool` from `command` (the first token of the shell command).
-- **Drop rule:** If the derived command is a generic interpreter (`python`, `python3`, `bash`, `sh`, `Rscript`, `perl`, `java`, `ruby`), the record MUST be dropped by the client and not submitted. These are not meaningful benchmarks without further tool identification.
+### 10. Client Responsibilities
 
-### 3.5 Input Type
+#### 10.1 Parameter Sanitization
 
-The `input_type` field captures the file extensions of input files as a comma-separated string of unique extensions, preserving compound extensions:
+When `params` is derived from the shell template, it already contains `{input}`/`{output}` placeholders and needs no further sanitization. When `_psb_params` is used, the author controls the content.
 
-- Single input: `.bam`
-- Multiple inputs of same type: `.fastq.gz`
-- Mixed inputs: `.fastq.gz,.fa,.bed`
+The server rejects parameters containing absolute path patterns (`/home/`, `/Users/`, `C:\`, `/tmp/`).
 
-This enables aggregation by data format.
+#### 10.2 Opt-in Consent
 
-### 3.6 CPU Features Bitmask
+Telemetry MUST be opt-in. No data is sent unless the user explicitly enables it (e.g. `--share-benchmark`).
 
-The `cpu_features` field encodes curated CPU feature flags relevant to scientific computing workloads into a compact `uint64` bitmask. This replaces the verbose raw `cpu_flags` string.
+#### 10.3 Privacy
 
-**Bit assignments (must be identical in client and server):**
+- Hostnames are hashed (`host_hash`), never sent raw.
+- File paths appear only as template placeholders.
+- IP addresses are not stored by the application.
+
+### 11. Wire Format
+
+The client submits observations as **JSON Lines** (`\n`-delimited). Each line inlines session, environment, and observation fields into a single flat JSON object — no nested envelope.
+
+```jsonl
+{"session_id":"...","record_id":"...","workflow_url":"...","host_hash":"...","cpu_model":"...","tool":"samtools","runtime_sec":42.3,...}
+```
+
+The `session_id` field ties the line to a session. Session-level fields (`workflow_url`, `workflow_version`) are repeated per line but stored once (first wins). Environment fields are repeated per line but deduplicated by hash.
+
+### 12. Transport
+
+```
+POST /v1/telemetry
+Content-Type: text/jsonl
+```
+
+The client accumulates observations locally and submits them as a single HTTP POST at session end. The server splits on `\n` and validates each line independently.
+
+<!-- INPUT NEEDED: Review the 10 MiB payload size limit — is this appropriate for large workflows? -->
+
+**Size limit:** 10 MiB uncompressed. A typical 500-observation session produces ~500 KiB.
+
+**Retry:** Resend the whole payload; duplicates are idempotent. On failure, the buffer is preserved.
+
+**Timeout:** Submission MUST NOT block workflow execution. Fire-and-forget with a short timeout (e.g. 10s).
+
+### 13. Authentication (MVP)
+
+A best-effort triple gate check — NOT cryptographic security, just an abuse deterrent.
+
+| Gate | Mechanism | Header/Cookie |
+|------|-----------|---------------|
+| 1 | Shared token | `X-PSB-Token: <token>` |
+| 2 | Session cookie | `Cookie: _psb_session=<value>` |
+| 3 | Nonce | `X-PSB-Nonce: <random string>` |
+
+The token is distributed with the client. It is a speed bump, not a secret. The nonce is per-request. If any gate fails, the server returns `418 I'm a teapot` with no further signal.
+
+### 14. Server Validation
+
+After gate checks, per-line validation:
+
+1. Valid JSON
+2. `session_id` non-empty
+3. `record_id` non-empty
+4. `tool` non-empty
+5. `runtime_sec` > 0
+6. `params` contains no absolute path patterns
+
+Invalid lines are skipped and reported. The request does not fail due to individual bad lines.
+
+### 15. Duplicate Handling
+
+An observation with the same `(session_id, record_id)` pair as an existing record is counted as a duplicate; the original is preserved. This makes submission idempotent.
+
+### 16. Response Format
+
+```json
+{
+  "status": "ok",
+  "accepted": 47,
+  "duplicates": 3,
+  "rejected": 2,
+  "errors": [
+    {"line": 12, "error": "runtime_sec must be > 0"}
+  ]
+}
+```
+
+Success and partial success both return **201 Created**. Gate failure returns **418**.
+
+---
+
+## Part III: Data Retrieval
+
+### 17. Read Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Paginated dashboard |
+| GET | `/session/:id` | Session detail |
+| GET | `/session/:id/jsonl` | Session as JSON Lines |
+| GET | `/session/:id/parquet` | Session as Parquet |
+| GET | `/env/:id` | Environment detail |
+| GET | `/record/:id` | Observation detail |
+| GET | `/record/:id/json` | Observation as JSON |
+| GET | `/export/parquet?tool=X&week=YYYY-Www` | Tool aggregate Parquet by ISO week |
+
+### 18. Export Formats
+
+**JSONL** (`/session/:id/jsonl`): One line per observation: `{"observation": {...}, "environment": {...}, "session": {...}}`.
+
+**JSON** (`/record/:id/json`): Same structure, single object.
+
+**Parquet** (`/session/:id/parquet`, `/export/parquet`): Flat table, one row per observation. Environment and session fields merged in. CPU features decoded to comma-separated string. Input/output arrays as JSON strings alongside computed scalar totals.
+
+---
+
+## Part IV: Security
+
+### 19. Threat Model (MVP)
+
+| Threat | MVP Mitigation | Production Mitigation |
+|--------|----------------|----------------------|
+| Spam | Triple gate check | API keys + rate limiting |
+| Path leakage | Server rejects absolute paths | Client stripping + server validation |
+| Hostname fingerprinting | SHA256 hash | Same |
+| Replay | Duplicate detection by `(session_id, record_id)` | Timestamped nonces with expiry |
+| Data poisoning | Trusted community model | Statistical outlier detection |
+| DDoS | Rate limiting | CDN, IP reputation |
+| URL abuse | Server strips query/fragment/auth, rejects non-http(s) | Same |
+
+### 20. Future Authentication
+
+Production deployments SHOULD replace the shared token with per-user API keys, OAuth2, and per-key rate limiting.
+
+---
+
+## Appendices
+
+### A. CPU Features Bitmask
+
+The `cpu_features` field encodes curated flags into a `uint64`. Bit assignments must be identical in client and server.
 
 | Bit | Feature | Category |
 |-----|---------|----------|
@@ -149,370 +396,77 @@ The `cpu_features` field encodes curated CPU feature flags relevant to scientifi
 | 9 | avx512bw | x86 SIMD |
 | 10 | avx512vl | x86 SIMD |
 | 11 | avx512dq | x86 SIMD |
-| 12 | avx512_vnni | x86 SIMD (ML inference) |
-| 13 | f16c | x86 half-precision float |
+| 12 | avx512_vnni | x86 SIMD (ML) |
+| 13 | f16c | x86 half-precision |
 | 14 | popcnt | Bit manipulation |
 | 15 | bmi1 | Bit manipulation |
 | 16 | bmi2 | Bit manipulation |
-| 17 | abm (lzcnt) | Bit manipulation |
+| 17 | abm/lzcnt | Bit manipulation |
 | 18 | aes | Crypto |
 | 19 | sha | Crypto |
 | 20 | pclmulqdq | Crypto (checksums) |
 | 21 | rdrand | Hardware RNG |
 | 22 | tsx | Transactional memory |
-| 23 | neon (asimd) | ARM SIMD |
+| 23 | neon/asimd | ARM SIMD |
 | 24 | sve | ARM scalable vectors |
 | 25 | sve2 | ARM scalable vectors |
 | 26 | crc32 | CRC |
 | 27 | xop | AMD |
 
-**Encoding:** The client reads raw CPU flag names from the OS (e.g. `/proc/cpuinfo` on Linux, `sysctl` on macOS) and ORs the corresponding bits. Multiple OS flag names may map to the same bit (e.g. `pni` and `sse3` both map to bit 1, `asimd` and `neon` both map to bit 23).
+Multiple OS flag names may map to the same bit (e.g. `pni`/`sse3` → bit 1, `asimd`/`neon` → bit 23).
 
-**Backward compatibility:** If a client sends `cpu_flags` (raw string) but no `cpu_features`, the server auto-encodes the string to the bitmask. For display and export, the server decodes the bitmask back to canonical flag names.
+### B. Deployment Mode
 
-### 3.7 Deployment Mode
+Reflects Snakemake `--software-deployment-method`:
 
-The `deploy_mode` field reflects the Snakemake `--software-deployment-method` setting:
+| Value | Meaning |
+|-------|---------|
+| `host` | No deployment method (bare metal) |
+| `conda` | Conda environments |
+| `apptainer` | Apptainer/Singularity containers |
+| `env_modules` | Environment modules |
 
-- `host` — no software deployment method (bare metal)
-- `conda` — Conda environments
-- `apptainer` — Apptainer/Singularity containers
-- `env_modules` — Environment modules
+<!-- INPUT NEEDED: Revisit the sorting order for multiple deployment methods. Should be nesting order (e.g. conda wrapping apptainer), not alphabetical. -->
 
-When multiple methods are active, they are joined with `+` in sorted order (e.g. `conda+apptainer`).
+When multiple methods are active, joined with `+` in sorted order (e.g. `conda+apptainer`).
 
-### 3.8 System State (Distress Metrics)
-
-Per-rule system state metrics capture the health of the execution environment at the time the job ran. These are optional fields on the record, captured at job start (load, memory, swap) and as a delta over the job duration (iowait).
-
-| Field | JSON key | Type | Capture point | Description |
-|-------|----------|------|---------------|-------------|
-| Load average | `load_avg` | float | Job start | 1-minute load average. Values >> cpu_cores indicate CPU contention. |
-| Memory available | `mem_avail_mb` | int | Job start | Available memory in MB. Low values indicate memory pressure. |
-| Swap used | `swap_used_mb` | int | Job start | Swap in use in MB. Any non-zero value during scientific computing is a red flag. |
-| I/O wait | `io_wait_pct` | float | Delta over job | Percentage of CPU time spent waiting for I/O during the job. High values indicate disk contention. Linux only (0 on other platforms). |
-
-**Purpose:** These metrics allow downstream analysis to flag unreliable runtime measurements. A job that ran while the system was swapping, overloaded, or I/O-bound may have inflated runtimes that should be excluded from benchmarks or weighted accordingly.
-
-**Platform support:**
-
-| Metric | Linux | macOS |
-|--------|-------|-------|
-| load_avg | `os.getloadavg()` | `os.getloadavg()` |
-| mem_avail_mb | `/proc/meminfo` MemAvailable | `vm_stat` (free + inactive pages) |
-| swap_used_mb | `/proc/meminfo` SwapTotal - SwapFree | `sysctl vm.swapusage` |
-| io_wait_pct | `/proc/stat` iowait delta | Not available (returns 0) |
-
-## 4. Wire Format
-
-### 4.1 Submission Format
-
-The client submits records as **JSON Lines** (one JSON object per line, `\n`-delimited). Each line is a complete record with environment fields inlined.
-
-```jsonl
-{"session_id":"a3f1...","record_id":"b7e2...","tool":"samtools","command":"samtools sort","params":"-@ 4 -m 2G {input}","input_size":1073741824,"num_inputs":1,"input_type":".bam","output_size":524288000,"runtime_sec":42.3,"threads":4,"max_rss_mb":1024.5,"cpu_percent":380.2,"exit_code":0,"load_avg":2.15,"mem_avail_mb":32000,"swap_used_mb":0,"io_wait_pct":1.2,"host_hash":"e3b0c4...","cpu_model":"Intel Xeon E5-2680 v4","cpu_features":16351,"cpu_cores":16,"l2_cache_kb":256,"l3_cache_kb":30720,"cpu_freq_mhz":3300,"os":"linux","kernel_version":"6.1.0","sm_version":"8.25.5","deploy_mode":"conda"}
-```
-
-### 4.2 Transport
-
-The client accumulates records locally during the workflow run (one JSONL line per completed rule). At session end, the entire JSONL payload is submitted as a single HTTP POST to the ingestion endpoint.
-
-```
-POST /v1/telemetry
-Content-Type: text/jsonl
-X-PSB-Token: <token>
-X-PSB-Nonce: <random string>
-Cookie: _psb_session=<value>
-
-{"session_id":"a3f1...","record_id":"b7e2...",...}\n
-{"session_id":"a3f1...","record_id":"c8d3...",...}\n
-```
-
-The server splits the request body on `\n`, validates each line independently, and returns a summary response. This avoids per-record HTTP overhead (connection setup, TLS handshake, gate checks) and makes retry trivial -- resend the whole payload; duplicates are idempotent.
-
-**Size limit:** The server SHOULD accept payloads up to 10 MiB uncompressed. A typical session with 500 records produces roughly 500 KiB of JSONL.
-
-## 5. Client Responsibilities
-
-### 5.1 Parameter Sanitization
-
-Before submission, the client MUST sanitize the `params` field:
-
-1. Replace all input file paths with `{input}`
-2. Replace all output file paths with `{output}`
-3. Replace log file paths with `{log}`
-4. Replace temporary directory paths with `{tmpdir}`
-5. Strip or mask any values for flags containing `email`, `key`, `token`, `password`, `secret`
-6. The server rejects parameters containing absolute path patterns (`/home/`, `/Users/`, `C:\`, `/tmp/`)
-
-### 5.2 Opt-in Consent
-
-Telemetry submission MUST be opt-in. The Snakemake client MUST NOT send telemetry unless the user has explicitly enabled it (e.g., via `--share-benchmark` flag or configuration).
-
-### 5.3 Hostname Anonymization
-
-The client MUST NOT submit the raw hostname. Instead, `host_hash` carries a SHA256 hash of the hostname. This allows correlation of records from the same machine without revealing identity.
-
-### 5.4 System State Capture
-
-The client SHOULD capture system state metrics (load average, available memory, swap usage) immediately before each benchmarked job starts. For I/O wait, the client SHOULD sample `/proc/stat` before and after the job and compute the delta percentage. These metrics have near-zero overhead (single procfs reads).
-
-### 5.5 Input/Output Measurement
-
-- **Input size:** Sum the sizes of all input files (not just the first).
-- **Num inputs:** Count the number of successfully stat'd input files.
-- **Input type:** Collect unique file extensions across all inputs, comma-separated.
-- **Output size:** Sum the sizes of all output files after job completion.
-
-## 6. Ingestion API
-
-### 6.1 Endpoint
-
-```
-POST /v1/telemetry
-Content-Type: text/jsonl
-```
-
-### 6.2 Authentication (MVP)
-
-The MVP uses a best-effort triple gate check. This is NOT cryptographically secure authentication; it is a lightweight abuse deterrent. Production deployments SHOULD implement proper API key or OAuth-based authentication.
-
-**Gate 1 -- Shared token (header):**
-
-```
-X-PSB-Token: <server-configured shared secret>
-```
-
-The token is distributed with the Snakemake client plugin. It is NOT a secret in the cryptographic sense; it is a speed bump against casual misuse.
-
-**Gate 2 -- Session cookie:**
-
-The client must include a `_psb_session` cookie with a non-empty value. This is set by the client on first contact and reused for the session lifetime.
-
-**Gate 3 -- Nonce header:**
-
-```
-X-PSB-Nonce: <random string>
-```
-
-A random string generated per-request. This is a lightweight anti-replay measure.
-
-**Failure mode:** If any gate fails, the server returns `418 I'm a teapot` with no further information. This deliberately provides no signal to automated abuse.
-
-### 6.3 Request Validation
-
-After gate checks pass, the server splits the request body on `\n` and validates each line independently:
-
-1. Line is valid JSON
-2. `session_id` is non-empty
-3. `record_id` is non-empty
-4. `tool` is non-empty
-5. `runtime_sec` > 0
-6. `params` does not contain absolute path patterns
-
-Lines that fail validation are skipped and reported in the response. The request as a whole does not fail due to individual bad records.
-
-### 6.4 Duplicate Handling
-
-If a record with the same `(session_id, record_id)` pair already exists, it is counted as a duplicate. The original record is preserved unchanged. This makes submission idempotent -- the client can safely resend the entire JSONL payload on transient failure.
-
-### 6.5 Response
-
-**Success (201 Created):**
-
-```json
-{
-  "status": "ok",
-  "accepted": 47,
-  "duplicates": 3,
-  "rejected": 0,
-  "errors": []
-}
-```
-
-**Partial success (201 Created):**
-
-```json
-{
-  "status": "ok",
-  "accepted": 45,
-  "duplicates": 3,
-  "rejected": 2,
-  "errors": [
-    {"line": 12, "error": "runtime_sec must be > 0"},
-    {"line": 38, "error": "tool is required"}
-  ]
-}
-```
-
-**Gate failure (418):**
-
-```json
-{
-  "error": "I'm a teapot"
-}
-```
-
-### 6.6 Data Retrieval API
-
-The following read endpoints are available:
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Paginated dashboard of all records |
-| GET | `/session/:id` | Records for a specific session |
-| GET | `/session/:id/jsonl` | Download session as JSON Lines |
-| GET | `/session/:id/parquet` | Download session as Apache Parquet |
-| GET | `/env/:id` | Environment detail |
-| GET | `/record/:id` | Single record detail |
-| GET | `/record/:id/json` | Download record as JSON |
-
-### 6.7 Export Formats
-
-**JSONL export** (`/session/:id/jsonl`): Each line is a JSON object containing `{"metric": {...}, "environment": {...}}` with all fields.
-
-**Parquet export** (`/session/:id/parquet`): A flat table with one row per record. Environment and metric fields are merged into a single row. CPU features are decoded from bitmask to comma-separated string for readability. All fields including distress metrics are included.
-
-## 7. Python Client Module
-
-The Snakemake telemetry plugin SHOULD implement the following interface:
-
-```python
-class PSBClient:
-    """Client for submitting benchmark telemetry to the PSB service."""
-
-    def __init__(self, endpoint: str, token: str):
-        """
-        Args:
-            endpoint: Base URL of the PSB ingestion service.
-            token: Shared X-PSB-Token value.
-        """
-
-    session_start: str
-    """ISO8601 timestamp recorded at client initialization.
-    Used for deterministic record_id derivation."""
-
-    def make_record_id(self, rule_name: str, wildcards: dict | None = None) -> str:
-        """Derive record_id as SHA256(session_start:rule_name:wildcards_str)[:16].
-
-        Uses the session start timestamp (not current time) and sorted
-        wildcard key=value pairs to ensure unique, idempotent record IDs.
-        """
-
-    def collect_environment(self) -> dict:
-        """Gather environment manifest:
-        - host_hash: SHA256(hostname)
-        - cpu_model: CPU model string
-        - cpu_features: uint64 bitmask of curated CPU flags (see Section 3.6)
-        - cpu_cores: physical core count
-        - l2_cache_kb: L2 cache size in KB
-        - l3_cache_kb: L3 cache size in KB
-        - cpu_freq_mhz: max CPU frequency in MHz
-        - os: standardized platform (linux/darwin/freebsd/windows)
-        - kernel_version: numeric kernel version
-        - kernel_string: full kernel version string
-        - sm_version: snakemake.__version__
-        - deploy_mode: deployment method(s) (see Section 3.7)
-        """
-
-    def add_record(self, record: dict) -> None:
-        """Append a record to the local buffer.
-
-        Called after each rule completes with the benchmark: directive.
-        The record dict must contain at minimum: record_id, tool, runtime_sec,
-        max_rss_mb, cpu_percent. Environment fields are merged automatically.
-
-        Optional fields: command, params, input_size, num_inputs, input_type,
-        output_size, threads, exit_code, load_avg, mem_avail_mb, swap_used_mb,
-        io_wait_pct.
-        """
-
-    def flush(self) -> dict:
-        """POST all buffered records as a single JSONL payload to /v1/telemetry.
-
-        Sets X-PSB-Token and X-PSB-Nonce headers, _psb_session cookie.
-        Clears the buffer on success.
-
-        Returns the server response dict with accepted/duplicates/rejected counts.
-        On network failure, the buffer is preserved for retry.
-        """
-```
-
-**System state capture helpers:**
-
-```python
-def capture_system_snapshot() -> dict:
-    """Capture system state at a point in time.
-
-    Returns: {
-        "load_avg": float,      # 1-min load average
-        "mem_avail_mb": int,    # available memory in MB
-        "swap_used_mb": int,    # swap in use in MB
-        "iowait_start": (int, int),  # raw (iowait_ticks, total_ticks) for delta
-    }
-    """
-
-def compute_iowait_pct(start: tuple, end: tuple) -> float:
-    """Compute iowait % from before/after tick snapshots."""
-```
-
-**Integration point:** During the workflow, each completed rule with a `benchmark:` directive calls `add_record()` with the extracted metrics. System state is captured before each benchmarked job starts and the iowait delta is computed after completion. At workflow end (or on `atexit`), `flush()` submits the accumulated payload in a single HTTP request. Telemetry MUST NOT block workflow execution -- `flush()` should be fire-and-forget with a short timeout (e.g., 10s).
-
-## 8. Security Considerations
-
-### 8.1 Threat Model (MVP)
-
-The MVP accepts that the ingestion endpoint is semi-public. The threat model covers:
-
-| Threat | Mitigation (MVP) | Mitigation (Production) |
-|--------|-------------------|------------------------|
-| Spam / garbage data | Triple gate check (token + cookie + nonce) | API keys with rate limiting |
-| Path leakage in params | Server-side rejection of absolute paths | Client-side stripping + server validation |
-| Hostname fingerprinting | SHA256 hash of hostname | Same |
-| Replay attacks | Duplicate detection by (session_id, record_id) | Timestamped nonces with expiry |
-| Data poisoning (fake metrics) | None (trusted community model) | Statistical outlier detection |
-| DDoS | Rate limiting (configurable req/s per IP) | CDN, IP reputation |
-
-### 8.2 Privacy
-
-- No personally identifiable information (PII) is collected by design.
-- Hostnames are hashed before submission.
-- File paths are sanitized to placeholders.
-- IP addresses are NOT stored by the application (though they may appear in access logs).
-
-### 8.3 Future Authentication
-
-Production deployments SHOULD replace the shared token with:
-
-1. Per-user API keys issued via a registration flow
-2. OAuth2 integration with institutional identity providers
-3. Rate limiting per API key (e.g., 1000 records/hour)
-
-## 9. Versioning
-
-The API is versioned via URL path prefix (`/v1/`). Breaking changes to the wire format or validation rules require a new version (`/v2/`).
-
-The `sm_version` field in the environment allows the server to apply version-specific parsing if the Snakemake benchmark output format changes.
-
-## 10. Database Indexes
-
-The server maintains the following indexes for query performance:
+### C. Database Indexes
 
 | Table | Index | Type |
 |-------|-------|------|
+| `sessions` | `session_id` | Unique |
 | `environments` | `hash` | Unique |
 | `execution_metrics` | `(session_id, record_id)` | Unique composite |
 | `execution_metrics` | `tool` | Non-unique |
 
-## 11. Future Work (Out of Scope for MVP)
+### D. API Versioning
+
+The API is versioned via URL path prefix (`/v1/`). Breaking changes require a new version. The `sm_version` environment field allows version-specific parsing.
+
+### E. Future Work
 
 - Compression (gzip request bodies)
-- Streaming submission (submit records during workflow execution, not just at end)
-- Result aggregation API (percentiles, distributions per tool)
-- Public leaderboard / comparison dashboard
-- Signed submissions (client-side Ed25519 signatures)
-- Tool version tracking (e.g., `samtools 1.21`)
+- Streaming submission (during workflow, not just at end)
+- Aggregation API (percentiles, distributions per tool)
+- Public comparison dashboard
+- Signed submissions (Ed25519)
 - Workflow-level aggregation (DAG hash)
-- Rule name capture (Snakemake rule name alongside tool)
-- Non-zero exit code recording (capture metrics even on failure)
-- Periodic background flushes (every N records or M seconds)
+- Rule name capture alongside tool
+- Non-zero exit code recording
+- Periodic background flushes
+
+### F. Open Questions
+
+Items needing discussion or design decisions before stabilizing the spec.
+
+- **`tool_version` resolution.** Currently user-specified via `_psb_tool_version` annotation, but this is fragile — users will forget to update it, or hard-code stale values. The right approach is probably a hook/callback mechanism: the client calls a user-provided function (or runs a shell command like `samtools --version`) to resolve the version from the runtime environment. This decouples version discovery from the workflow specification. Until then, `_psb_tool_version` is a stopgap.
+
+- **`_psb_params` format.** Currently free-form string. Should this be structured (e.g. key-value pairs)? Free-form is simpler and matches how shell arguments work, but structured params would enable better downstream aggregation (e.g. grouping by `-@ 4` vs `-@ 8`). May not be worth the complexity for MVP.
+
+- **`category` vs `tags`.** A single `category` string is limiting. A `tags` list (e.g. `["alignment", "single-cell", "10x"]`) would allow richer cross-method queries. But tags need governance (free-form tags drift quickly). Consider a controlled vocabulary or at least a recommended tag list.
+
+- **Deployment mode ordering.** When multiple methods are active (e.g. `conda+apptainer`), the current alphabetical join doesn't reflect nesting semantics. `conda` wrapping `apptainer` is different from the reverse. Need to decide if ordering matters for analysis and, if so, how to capture nesting.
+
+- **Payload size limit.** 10 MiB may be tight for very large workflows (thousands of rules with many files each). Need real-world data to calibrate.
+
+- **Interpreter skip heuristic.** Auto-detection skips leading interpreter tokens (`python`, `bash`, etc.) to find the "real" tool. This works for `python scripts/foo.py` but produces odd results for `bash -c "complex command"` (tool becomes `-c`). May need a smarter heuristic or just rely on annotations for non-trivial cases.
